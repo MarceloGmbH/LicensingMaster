@@ -1,15 +1,13 @@
-# Central multi-product licensing control plane (ADR-0013): its own Postgres,
-# the licensing-master API (portal bundled at "/"), and a dormant Cloudflare
-# Tunnel connector.
+# Central licensing control plane (ADR-0013): its own Postgres, the
+# licensing-master API (with the portal bundled and served at "/"), and a
+# Cloudflare Tunnel connector. No published ports — the only way in is the
+# tunnel, so the box needs no public IP.
 #
-#   cp .env.example .env        # fill in real secrets
-#   docker compose up -d --build
+#   cp .env.licensing.example .env.licensing     # fill in real secrets
+#   docker compose --env-file .env.licensing -f docker-compose.licensing.yml up -d --build
 #
 # Migrations run automatically on container start (entrypoint.sh -> alembic
-# upgrade head). Ingress is handled by the shared Traefik on vm-gateway, which
-# routes licensing.alanadev.com + licensing-cp.alanadev.com to this container's
-# published port (see deploy.md). The `cloudflared` service is kept defined but
-# OFF (profile `tunnel`) for a possible future switch to a real tunnel.
+# upgrade head). Cloudflare dashboard steps: context/backend/licensing-master/deploy.md
 
 name: licensing
 
@@ -34,14 +32,14 @@ services:
 
   licensing-master:
     build:
-      context: .
+      context: ./apps
       dockerfile: licensing-master/Dockerfile
     restart: unless-stopped
     mem_limit: 512m
     cpus: 0.75
     environment:
       # `production` enforces Cloudflare Access on /admin/* and /. Set
-      # LM_APP_ENV=development for a pre-Access smoke where the X-Dev-Admin-Email
+      # LM_APP_ENV=development for a pre-tunnel smoke where the X-Dev-Admin-Email
       # header fallback is accepted instead.
       APP_ENV: ${LM_APP_ENV:-production}
       APP_DEBUG: "false"
@@ -49,7 +47,7 @@ services:
       # Ed25519 private key (base64, 32 raw bytes). Empty -> deterministic dev
       # signer; set a real key before shipping device_config.dat to clients.
       LM_ED25519_PRIVATE_KEY_B64: ${LM_ED25519_PRIVATE_KEY_B64:-}
-      # Cloudflare Access — verifies the JWT injected on /admin/* and /.
+      # Cloudflare Access — verifies the JWT the tunnel injects on /admin/* and /.
       # Required in production; may be empty for an LM_APP_ENV=development smoke.
       LM_ACCESS_TEAM_DOMAIN: ${LM_ACCESS_TEAM_DOMAIN:-}
       LM_ACCESS_AUD: ${LM_ACCESS_AUD:-}
@@ -58,9 +56,10 @@ services:
       LM_DEFAULT_GRACE_DAYS: ${LM_DEFAULT_GRACE_DAYS:-5}
       LM_DEFAULT_SEAT_LIMIT: ${LM_DEFAULT_SEAT_LIMIT:-5}
       CORS_ORIGINS: ${LM_CORS_ORIGINS:-["*"]}
-    # Published for the shared Traefik reverse proxy on vm-gateway. On vm-services
-    # the .env sets LM_BIND_ADDR=0.0.0.0 and LM_HOST_PORT=3013 — Traefik's
-    # licensing.yml router points at 10.10.4.10:3013. Safe local default: 127.0.0.1.
+    # Published for curl verification and for an external reverse proxy (e.g. a
+    # shared Traefik) when you route ingress that way instead of the bundled
+    # cloudflared. Safe default: localhost only. Set LM_BIND_ADDR=0.0.0.0 and an
+    # LM_HOST_PORT to expose it on the host's LAN interface.
     ports:
       - "${LM_BIND_ADDR:-127.0.0.1}:${LM_HOST_PORT:-8010}:8000"
     depends_on:
@@ -69,8 +68,8 @@ services:
     networks: [lm]
 
   cloudflared:
-    # OFF by default. Only starts with `--profile tunnel`. Ingress is Traefik
-    # today; this is here so a future switch to a real tunnel is one env var away.
+    # Only starts with `--profile tunnel`. Skip it when ingress is handled by an
+    # external/shared reverse proxy (see the ports: note on licensing-master).
     profiles: ["tunnel"]
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
@@ -84,12 +83,7 @@ services:
     networks: [lm]
 
 volumes:
-  # The one stateful volume. Declared external so the compose refuses to start
-  # against a missing volume instead of silently creating an empty one — the
-  # separation cut re-attaches the existing `licensing_lm_pgdata` by name.
   lm_pgdata:
-    external: true
-    name: licensing_lm_pgdata
 
 networks:
   lm:
