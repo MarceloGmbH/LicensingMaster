@@ -1,10 +1,9 @@
 # Multi-stage build for licensing-master (ADR-0013).
-# Build context is the repository's `apps/` directory so both the API and the
-# portal source are visible:
-#   docker build -f licensing-master/Dockerfile -t licensing-master ./apps
-# (docker-compose.licensing.yml sets `context: ./apps` for you.)
+# Build context is the repository root:
+#   docker build -f licensing-master/Dockerfile -t licensing-master .
+# (docker-compose.yml sets `context: .` for you.)
 
-# --- stage 1: build the portal (apps/licensing-portal -> dist) -------------
+# --- stage 1: build the portal (licensing-portal -> dist) -------------
 FROM node:20-slim AS portal
 WORKDIR /portal
 COPY licensing-portal/package.json ./

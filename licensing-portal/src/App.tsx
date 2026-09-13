@@ -96,10 +96,11 @@ const TenantList: React.FC<{
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [seats, setSeats] = useState("5");
+  const [baseUrl, setBaseUrl] = useState("");
   const [busy, setBusy] = useState(false);
 
   const create = async () => {
-    if (!slug.trim() || !name.trim()) return;
+    if (!slug.trim() || !name.trim() || !baseUrl.trim()) return;
     setBusy(true);
     try {
       await api.createTenant({
@@ -108,10 +109,12 @@ const TenantList: React.FC<{
         name: name.trim(),
         contact_email: email.trim() || null,
         seat_limit: Number(seats) || 1,
+        base_url: baseUrl.trim(),
       });
       setSlug("");
       setName("");
       setEmail("");
+      setBaseUrl("");
       onCreated();
     } catch (e) {
       onError(String((e as Error).message));
@@ -182,7 +185,17 @@ const TenantList: React.FC<{
             Asientos
             <input value={seats} onChange={(e) => setSeats(e.target.value)} style={{ width: 64 }} />
           </label>
-          <button className="primary" disabled={busy || !slug.trim() || !name.trim()} onClick={create}>
+          <label className="f">
+            Base URL
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              type="url"
+              placeholder="https://backend-cliente.com"
+              required
+            />
+          </label>
+          <button className="primary" disabled={busy || !slug.trim() || !name.trim() || !baseUrl.trim()} onClick={create}>
             {busy ? "Creando…" : "Crear cliente"}
           </button>
         </div>
@@ -204,11 +217,17 @@ const TenantView: React.FC<{
   const [quota, setQuota] = useState("2");
   const [payAmount, setPayAmount] = useState("");
   const [seatEdit, setSeatEdit] = useState("");
+  const [baseUrlEdit, setBaseUrlEdit] = useState("");
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const reload = useCallback(() => {
     api.tenant(tenantId).then((x) => {
       setD(x);
       setSeatEdit(String(x.subscription.seat_limit));
+      setBaseUrlEdit(x.tenant.base_url || "");
     }).catch((e) => onError(String(e.message)));
   }, [tenantId, onError]);
 
@@ -226,6 +245,23 @@ const TenantView: React.FC<{
       reload();
     } catch (e) {
       onError(String((e as Error).message));
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deletePassword.trim()) {
+      setDeleteError("La contraseña de administrador es requerida");
+      return;
+    }
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteTenant(tenantId, deletePassword.trim());
+      onBack();
+    } catch (e) {
+      setDeleteError(String((e as Error).message));
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -256,6 +292,9 @@ const TenantView: React.FC<{
             }
           >
             Emitir service token
+          </button>
+          <button className="danger" onClick={() => setShowDeleteModal(true)}>
+            Eliminar cliente
           </button>
         </div>
         {serviceToken && (
@@ -300,46 +339,70 @@ const TenantView: React.FC<{
         </div>
 
         <div className="panel">
-          <h2>Registrar pago</h2>
-          <p className="muted" style={{ marginTop: 0 }}>
-            Empuja <code>valid_until</code> +{s.window_days} días y marca la suscripción al día.
-          </p>
-          <div className="row">
-            <label className="f">
-              Monto
-              <input value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="350.00" />
+          <h2>Base URL</h2>
+          <div className="row" style={{ alignItems: "flex-end" }}>
+            <label className="f" style={{ flex: 1 }}>
+              Base URL
+              <input
+                value={baseUrlEdit}
+                onChange={(e) => setBaseUrlEdit(e.target.value)}
+                type="url"
+                placeholder="https://backend-cliente.com"
+              />
             </label>
             <button
-              className="primary"
-              disabled={!payAmount.trim()}
+              disabled={!baseUrlEdit.trim()}
               onClick={() =>
-                guard(async () => {
-                  await api.recordPayment(tenantId, { amount: payAmount.trim() });
-                  setPayAmount("");
-                })
+                guard(() => api.patchTenant(tenantId, { base_url: baseUrlEdit.trim() }))
               }
             >
-              Registrar
+              Guardar
             </button>
           </div>
-          <table style={{ marginTop: 10 }}>
-            <thead>
-              <tr><th>Fecha</th><th className="right">Monto</th><th>Nota</th></tr>
-            </thead>
-            <tbody>
-              {d.payments.length === 0 && (
-                <tr><td colSpan={3} className="muted">Sin pagos registrados.</td></tr>
-              )}
-              {d.payments.map((p) => (
-                <tr key={p.payment_id}>
-                  <td className="mono">{fmtDate(p.recorded_at)}</td>
-                  <td className="right mono">{p.amount} {p.currency}</td>
-                  <td className="muted">{p.note ?? "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {!baseUrlEdit && <p className="muted" style={{ marginTop: 8 }}>Sin Base URL configurada</p>}
         </div>
+      </div>
+
+      <div className="panel">
+        <h2>Registrar pago</h2>
+        <p className="muted" style={{ marginTop: 0 }}>
+          Empuja <code>valid_until</code> +{s.window_days} días y marca la suscripción al día.
+        </p>
+        <div className="row">
+          <label className="f">
+            Monto
+            <input value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="350.00" />
+          </label>
+          <button
+            className="primary"
+            disabled={!payAmount.trim()}
+            onClick={() =>
+              guard(async () => {
+                await api.recordPayment(tenantId, { amount: payAmount.trim() });
+                setPayAmount("");
+              })
+            }
+          >
+            Registrar
+          </button>
+        </div>
+        <table style={{ marginTop: 10 }}>
+          <thead>
+            <tr><th>Fecha</th><th className="right">Monto</th><th>Nota</th></tr>
+          </thead>
+          <tbody>
+            {d.payments.length === 0 && (
+              <tr><td colSpan={3} className="muted">Sin pagos registrados.</td></tr>
+            )}
+            {d.payments.map((p) => (
+              <tr key={p.payment_id}>
+                <td className="mono">{fmtDate(p.recorded_at)}</td>
+                <td className="right mono">{p.amount} {p.currency}</td>
+                <td className="muted">{p.note ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       <div className="panel">
@@ -439,6 +502,41 @@ const TenantView: React.FC<{
           </tbody>
         </table>
       </div>
+
+      {showDeleteModal && (
+        <div className="modal-overlay" onClick={() => setShowDeleteModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>Eliminar cliente</h3>
+            <p className="muted">
+              Esta acción es irreversible. Se eliminará el cliente <strong>{d.tenant.name}</strong>
+              ({d.tenant.slug}) y todos sus datos asociados.
+            </p>
+            <label className="f" style={{ marginTop: 16, display: "block" }}>
+              Contraseña de administrador
+              <input
+                type="password"
+                value={deletePassword}
+                onChange={(e) => setDeletePassword(e.target.value)}
+                placeholder="Ingrese la contraseña de admin"
+                autoFocus
+              />
+            </label>
+            {deleteError && <div className="err" style={{ marginTop: 12 }}>{deleteError}</div>}
+            <div className="row" style={{ marginTop: 16, justifyContent: "flex-end" }}>
+              <button onClick={() => { setShowDeleteModal(false); setDeletePassword(""); setDeleteError(null); }}>
+                Cancelar
+              </button>
+              <button
+                className="danger"
+                disabled={deleteBusy}
+                onClick={handleDelete}
+              >
+                {deleteBusy ? "Eliminando…" : "Eliminar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 };

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     LM_DEFAULT_GRACE_DAYS: int = 5
     LM_DEFAULT_SEAT_LIMIT: int = 5
 
+    # Admin delete tenant password (required for DELETE /admin/tenants/{tenant_id})
+    LM_ADMIN_DELETE_PASSWORD: str = ""
+
     CORS_ORIGINS: list[str] = ["*"]
 
     @property

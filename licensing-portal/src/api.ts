@@ -33,6 +33,7 @@ export interface TenantRow {
   valid_until: string | null;
   subscription_status: string | null;
   is_paid: boolean | null;
+  base_url: string | null;
 }
 
 export interface Subscription {
@@ -124,6 +125,16 @@ export const api = {
     }),
   revokeDevice: (hw: string) =>
     req<Device>(`/admin/devices/${encodeURIComponent(hw)}/revoke`, { method: "POST" }),
+  deleteTenant: (id: number, adminPassword: string) =>
+    req<void>(`/admin/tenants/${id}`, {
+      method: "DELETE",
+      headers: { "X-Admin-Delete-Password": adminPassword },
+    }),
+  patchTenant: (id: number, body: Record<string, unknown>) =>
+    req<TenantDetail>(`/admin/tenants/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
 };
 
 export function fmtDate(iso: string | null | undefined): string {

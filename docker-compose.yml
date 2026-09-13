@@ -4,10 +4,10 @@
 # tunnel, so the box needs no public IP.
 #
 #   cp .env.licensing.example .env.licensing     # fill in real secrets
-#   docker compose --env-file .env.licensing -f docker-compose.licensing.yml up -d --build
+#   docker compose --env-file .env.licensing -f docker-compose.yml up -d --build
 #
 # Migrations run automatically on container start (entrypoint.sh -> alembic
-# upgrade head). Cloudflare dashboard steps: context/backend/licensing-master/deploy.md
+# upgrade head). Cloudflare dashboard steps: deploy.md
 
 name: licensing
 
@@ -32,7 +32,7 @@ services:
 
   licensing-master:
     build:
-      context: ./apps
+      context: .
       dockerfile: licensing-master/Dockerfile
     restart: unless-stopped
     mem_limit: 512m

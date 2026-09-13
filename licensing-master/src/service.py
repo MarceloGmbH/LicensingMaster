@@ -170,6 +170,10 @@ def admin_create_tenant(conn: Connection, actor: str, body: dict) -> dict:
     if dup is not None:
         raise ConflictError(message=f"Tenant '{slug}' already exists for {prod['code']}")
 
+    base_url = _norm_base_url(body.get("base_url"))
+    if not base_url:
+        raise ValidationError(message="base_url is required", field="base_url")
+
     tenant_id = conn.execute(
         tenants.insert()
         .values(
@@ -177,7 +181,7 @@ def admin_create_tenant(conn: Connection, actor: str, body: dict) -> dict:
             slug=slug,
             name=str(body["name"]).strip(),
             contact_email=(body.get("contact_email") or None),
-            base_url=_norm_base_url(body.get("base_url")),
+            base_url=base_url,
         )
         .returning(tenants.c.tenant_id)
     ).scalar_one()
@@ -245,7 +249,10 @@ def admin_patch_tenant(conn: Connection, actor: str, tenant_id: int, body: dict)
     if "contact_email" in body:
         values["contact_email"] = (body.get("contact_email") or None)
     if "base_url" in body:
-        values["base_url"] = _norm_base_url(body.get("base_url"))
+        base_url = _norm_base_url(body.get("base_url"))
+        if not base_url:
+            raise ValidationError(message="base_url cannot be empty", field="base_url")
+        values["base_url"] = base_url
     if values:
         conn.execute(tenants.update().where(tenants.c.tenant_id == tenant_id).values(**values))
         _audit(conn, actor, "tenant.patch", "tenant", tenant_id, {k: str(v) for k, v in values.items()})
@@ -385,6 +392,14 @@ def admin_revoke_device(conn: Connection, actor: str, hardware_uuid: str) -> dic
     _release_seat(conn, hardware_uuid)
     _audit(conn, actor, "device.revoke", "device", hardware_uuid)
     return dict(row)
+
+
+def admin_delete_tenant(conn: Connection, actor: str, tenant_id: int) -> dict:
+    """Hard delete a tenant. Cascades via FK ondelete=CASCADE."""
+    _tenant_row(conn, tenant_id)  # 404 if missing
+    conn.execute(tenants.delete().where(tenants.c.tenant_id == tenant_id))
+    _audit(conn, actor, "tenant.delete", "tenant", tenant_id)
+    return {"deleted": True, "tenant_id": tenant_id}
 
 
 def admin_list_audit(conn: Connection, limit: int = 100) -> list[dict]:

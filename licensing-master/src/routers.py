@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Header, Query
 from sqlalchemy.engine import Connection
 
 from src import service
 from src.auth import AdminIdentity, ServiceIdentity, admin_identity, service_identity
+from src.config import settings
 from src.db import UnitOfWork, get_read_connection, get_write_uow
 from src.envelope import Envelope, ok
+from src.errors import ForbiddenError
 
 router = APIRouter()
 
@@ -80,6 +82,23 @@ def patch_tenant(
     body: Annotated[dict, Body()],
 ) -> Envelope:
     return ok(service.admin_patch_tenant(uow.connection, ident.email, tenant_id, body))
+
+
+@admin.delete("/tenants/{tenant_id}", response_model=Envelope)
+def delete_tenant(
+    tenant_id: int,
+    uow: Annotated[UnitOfWork, Depends(get_write_uow)],
+    ident: Annotated[AdminIdentity, Depends(admin_identity)],
+    x_admin_delete_password: Annotated[str | None, Header(alias="X-Admin-Delete-Password")] = None,
+    body: Annotated[dict, Body()] = None,
+) -> Envelope:
+    """Hard delete a tenant (cascades via FK ondelete=CASCADE).
+    Requires X-Admin-Delete-Password header or admin_password body field.
+    """
+    provided = x_admin_delete_password or (body or {}).get("admin_password")
+    if provided != settings.LM_ADMIN_DELETE_PASSWORD:
+        raise ForbiddenError(message="Invalid admin password")
+    return ok(service.admin_delete_tenant(uow.connection, ident.email, tenant_id))
 
 
 @admin.patch("/tenants/{tenant_id}/subscription", response_model=Envelope)
