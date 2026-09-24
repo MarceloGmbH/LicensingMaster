@@ -94,7 +94,13 @@ def _norm_base_url(raw: str | None) -> str | None:
 
 def _tenant_row(conn: Connection, tenant_id: int) -> dict:
     row = (
-        conn.execute(select(tenants).where(tenants.c.tenant_id == tenant_id)).mappings().first()
+        conn.execute(
+            select(tenants, products.c.code.label("product_code"))
+            .join(products, products.c.product_id == tenants.c.product_id)
+            .where(tenants.c.tenant_id == tenant_id)
+        )
+        .mappings()
+        .first()
     )
     if row is None:
         raise NotFoundError(message=f"Tenant {tenant_id} not found")
@@ -203,9 +209,6 @@ def admin_create_tenant(conn: Connection, actor: str, body: dict) -> dict:
 
 def admin_tenant_detail(conn: Connection, tenant_id: int) -> dict:
     t = _tenant_row(conn, tenant_id)
-    prod = conn.execute(
-        select(products).where(products.c.product_id == t["product_id"])
-    ).mappings().first()
     sub = _subscription_row(conn, tenant_id)
     toks = conn.execute(
         select(batch_tokens)
@@ -226,7 +229,7 @@ def admin_tenant_detail(conn: Connection, tenant_id: int) -> dict:
     seats_used = sum(1 for d in devs if not d["is_revoked"])
     now = _now()
     return {
-        "tenant": {**t, "product_code": prod["code"] if prod else None},
+        "tenant": t,
         "subscription": {
             **sub,
             "seats_used": seats_used,
@@ -282,12 +285,11 @@ def admin_patch_subscription(conn: Connection, actor: str, tenant_id: int, body:
 
 def admin_generate_batch_token(conn: Connection, actor: str, tenant_id: int, body: dict) -> dict:
     t = _tenant_row(conn, tenant_id)
-    prod = conn.execute(select(products).where(products.c.product_id == t["product_id"])).mappings().first()
     sub = _subscription_row(conn, tenant_id)
     quota = int(body.get("quota") or 0)
     if quota <= 0:
         raise ValidationError(message="quota must be > 0", field="quota")
-    token = f"BATCH-{prod['code'].upper()}-{t['slug'].upper()}-{secrets.token_hex(4).upper()}"
+    token = f"BATCH-{t['product_code'].upper()}-{t['slug'].upper()}-{secrets.token_hex(4).upper()}"
     expires_at = body.get("expires_at")
     row = conn.execute(
         batch_tokens.insert()
@@ -722,7 +724,7 @@ def public_activate(conn: Connection, body: dict) -> dict:
 def _activation_result(dev: dict, tenant: dict, now: datetime, *, reactivated: bool = False) -> dict:
     payload = {
         "schema": "device_config.dat/v1",
-        "product_code": None,
+        "product_code": tenant.get("product_code"),
         "tenant_slug": tenant["slug"],
         "tenant_base_url": tenant.get("base_url"),
         "device_name": dev["device_name"],
