@@ -16,6 +16,7 @@ docker-compose.yml    the deployable stack (db + app + dormant cloudflared)
 .env.example          configuration template
 deploy.md             how it runs behind the shared Traefik on vm-gateway
 docs/INTEGRATION.md   self-contained guide for integrating any other product
+docs/FRONTEND-REQUIREMENTS.md   client-side blueprint: stack, installer, storage, retrofit checklist
 ```
 
 ## Run it
