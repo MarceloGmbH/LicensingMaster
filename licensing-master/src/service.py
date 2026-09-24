@@ -604,7 +604,26 @@ def cp_consume_seat(conn: Connection, tenant_id: int | None, body: dict) -> dict
 
 
 def _device_config(payload: dict) -> str:
-    return json.dumps({"payload": payload, "signature": sign_payload(payload)}, separators=(",", ":"))
+    # BUG FIX: sign_payload() signs the CANONICAL form of `payload`
+    # (json.dumps(..., sort_keys=True, separators=(",", ":")) — see
+    # signer.py's _canonical()). This function used to re-serialize the same
+    # `payload` dict WITHOUT sort_keys=True when embedding it in the outer
+    # {"payload": ..., "signature": ...} envelope — insertion order, not
+    # sorted. A client extracting the raw "payload" substring from this
+    # embedded JSON (the only correct way to verify byte-for-byte, since
+    # JSON.parse -> JSON.stringify round-tripping isn't guaranteed to
+    # reproduce the exact signed bytes) was therefore verifying different
+    # bytes than what was actually signed — Ed25519 verification failed for
+    # every device activation using real signing, unconditionally. Caught via
+    # a real device activation client-side (SistemaVentas), confirmed here by
+    # reproducing the byte mismatch directly. sort_keys=True on this call
+    # makes the embedded payload substring byte-identical to what
+    # sign_payload() actually signed.
+    return json.dumps(
+        {"payload": payload, "signature": sign_payload(payload)},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _do_activate(conn: Connection, t: dict, sub: dict, tok: dict, body: dict, now: datetime) -> dict:
