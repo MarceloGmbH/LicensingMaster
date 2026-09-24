@@ -382,17 +382,57 @@ def admin_mint_service_token(conn: Connection, actor: str, tenant_id: int, name:
     return {"token": raw}
 
 
+def _device_row(conn: Connection, hardware_uuid: str, *, for_update: bool = False) -> dict:
+    stmt = select(device_activations).where(device_activations.c.hardware_uuid == hardware_uuid)
+    if for_update:
+        stmt = stmt.with_for_update()
+    row = conn.execute(stmt).mappings().first()
+    if row is None:
+        raise NotFoundError(message="No device bound to that hardware_uuid")
+    return dict(row)
+
+
 def admin_revoke_device(conn: Connection, actor: str, hardware_uuid: str) -> dict:
+    """Revoke a device and hand its batch-token seat back. Revoking an already
+    revoked device is a no-op (no second seat release, no second audit entry)."""
+    row = _release_seat(conn, hardware_uuid)
+    if row is None:
+        return _device_row(conn, hardware_uuid)  # 404 if unknown, else already revoked
+    _audit(conn, actor, "device.revoke", "device", hardware_uuid)
+    return row
+
+
+def admin_reinstate_device(conn: Connection, actor: str, hardware_uuid: str) -> dict:
+    """Undo a revocation. The device keeps its license_key, so the signed
+    device_config already installed on the client stays valid (no reinstall).
+    Re-books a seat under the tenant seat_limit and the original batch token's
+    quota; the token's own revoked/expired state is not checked — reinstating
+    is an explicit admin decision. No-op if the device is not revoked."""
+    dev = _device_row(conn, hardware_uuid, for_update=True)
+    if not dev["is_revoked"]:
+        return dev
+    sub = _subscription_row(conn, dev["tenant_id"])
+    _ensure_tenant_seat(conn, dev["tenant_id"], sub)
+    if dev["activated_via"]:
+        tok = conn.execute(
+            select(batch_tokens).where(batch_tokens.c.batch_token_id == dev["activated_via"])
+        ).mappings().first()
+        if tok is not None:
+            _consume_seat(conn, dict(tok), hardware_uuid)
+    values: dict[str, Any] = {"is_revoked": False}
+    t = _tenant_row(conn, dev["tenant_id"])
+    if sub["is_paid"] and t["status"] == "ACTIVE":
+        now = _now()
+        fresh = now + timedelta(days=int(sub["window_days"]))
+        if dev["valid_until"] is None or dev["valid_until"] < fresh:
+            values["valid_until"] = fresh
     row = conn.execute(
         device_activations.update()
         .where(device_activations.c.hardware_uuid == hardware_uuid)
-        .values(is_revoked=True)
+        .values(**values)
         .returning(device_activations)
-    ).mappings().first()
-    if row is None:
-        raise NotFoundError(message="No device bound to that hardware_uuid")
-    _release_seat(conn, hardware_uuid)
-    _audit(conn, actor, "device.revoke", "device", hardware_uuid)
+    ).mappings().one()
+    _audit(conn, actor, "device.reinstate", "device", hardware_uuid)
     return dict(row)
 
 
@@ -496,19 +536,37 @@ def _consume_seat(conn: Connection, token_row: dict, hardware_uuid: str) -> None
         )
 
 
-def _release_seat(conn: Connection, hardware_uuid: str) -> None:
-    row = (
-        conn.execute(
-            select(
-                device_activations.c.activated_via,
-                device_activations.c.is_revoked,
-            ).where(device_activations.c.hardware_uuid == hardware_uuid)
+def _ensure_tenant_seat(conn: Connection, tenant_id: int, sub: dict) -> None:
+    active_seats = conn.execute(
+        select(func.count())
+        .select_from(device_activations)
+        .where(
+            device_activations.c.tenant_id == tenant_id,
+            device_activations.c.is_revoked.is_(False),
         )
-        .mappings()
-        .first()
-    )
-    if not row or row["is_revoked"]:
-        return
+    ).scalar_one()
+    if active_seats >= int(sub["seat_limit"]):
+        raise SeatLimitReachedError(
+            context={"active_seats": active_seats, "seat_limit": sub["seat_limit"]}
+        )
+
+
+def _release_seat(conn: Connection, hardware_uuid: str) -> dict | None:
+    """Revoke the device and give its seat back to the batch token it was
+    booked against. Atomic and idempotent: the conditional UPDATE only matches
+    a live row, so a device's seat is released at most once. Returns the
+    revoked row, or None if there was no live row."""
+    row = conn.execute(
+        device_activations.update()
+        .where(
+            device_activations.c.hardware_uuid == hardware_uuid,
+            device_activations.c.is_revoked.is_(False),
+        )
+        .values(is_revoked=True)
+        .returning(device_activations)
+    ).mappings().first()
+    if row is None:
+        return None
     if row["activated_via"]:
         conn.execute(
             batch_tokens.update()
@@ -518,13 +576,7 @@ def _release_seat(conn: Connection, hardware_uuid: str) -> None:
             )
             .values(seats_consumed=batch_tokens.c.seats_consumed - 1)
         )
-    # Free the seat for the tenant-wide active count too, so the portal and any
-    # future re-activation see it as available.
-    conn.execute(
-        device_activations.update()
-        .where(device_activations.c.hardware_uuid == hardware_uuid)
-        .values(is_revoked=True)
-    )
+    return dict(row)
 
 
 def cp_release_seat(conn: Connection, tenant_id: int | None, hardware_uuid: str) -> dict:
@@ -566,18 +618,7 @@ def cp_consume_seat(conn: Connection, tenant_id: int | None, body: dict) -> dict
         )
         return {"consumed": False, "reactivated": True, "hardware_uuid": hw}
 
-    active_seats = conn.execute(
-        select(func.count())
-        .select_from(device_activations)
-        .where(
-            device_activations.c.tenant_id == t["tenant_id"],
-            device_activations.c.is_revoked.is_(False),
-        )
-    ).scalar_one()
-    if active_seats >= int(sub["seat_limit"]):
-        raise SeatLimitReachedError(
-            context={"active_seats": active_seats, "seat_limit": sub["seat_limit"]}
-        )
+    _ensure_tenant_seat(conn, t["tenant_id"], sub)
 
     _consume_seat(conn, dict(tok), hw)
 
@@ -647,35 +688,30 @@ def _do_activate(conn: Connection, t: dict, sub: dict, tok: dict, body: dict, no
         ).mappings().one()
         return _activation_result(dict(row), t, now, reactivated=True)
 
-    active_seats = conn.execute(
-        select(func.count())
-        .select_from(device_activations)
-        .where(
-            device_activations.c.tenant_id == t["tenant_id"],
-            device_activations.c.is_revoked.is_(False),
-        )
-    ).scalar_one()
-    if active_seats >= int(sub["seat_limit"]):
-        raise SeatLimitReachedError(
-            context={"active_seats": active_seats, "seat_limit": sub["seat_limit"]}
-        )
+    _ensure_tenant_seat(conn, t["tenant_id"], sub)
     _consume_seat(conn, dict(tok), hw)
 
-    license_key = "LIC-" + secrets.token_urlsafe(32)
-    row = conn.execute(
-        device_activations.insert()
-        .values(
-            tenant_id=t["tenant_id"],
-            hardware_uuid=hw,
-            device_name=str(body["device_name"]).strip(),
-            branch_ref=(body.get("branch_ref") or None),
-            license_key=license_key,
-            valid_from=now,
-            valid_until=now + timedelta(days=int(sub["window_days"])),
-            activated_via=tok["batch_token_id"],
+    row_values = {
+        "tenant_id": t["tenant_id"],
+        "device_name": str(body["device_name"]).strip(),
+        "branch_ref": (body.get("branch_ref") or None),
+        "license_key": "LIC-" + secrets.token_urlsafe(32),
+        "valid_from": now,
+        "valid_until": now + timedelta(days=int(sub["window_days"])),
+        "activated_via": tok["batch_token_id"],
+    }
+    if existing is not None:
+        # Previously revoked — re-book the same row (hardware_uuid is UNIQUE).
+        # Revocation released the binding, so the hardware may move to the
+        # tenant that owns this batch token; tenant_id is rebound here.
+        stmt = (
+            device_activations.update()
+            .where(device_activations.c.hardware_uuid == hw)
+            .values(**row_values, is_revoked=False, last_seen_at=now)
         )
-        .returning(device_activations)
-    ).mappings().one()
+    else:
+        stmt = device_activations.insert().values(hardware_uuid=hw, **row_values)
+    row = conn.execute(stmt.returning(device_activations)).mappings().one()
     return _activation_result(dict(row), t, now)
 
 

@@ -488,7 +488,11 @@ const TenantView: React.FC<{
                 <td className="mono">{fmtDate(dev.valid_until)}</td>
                 <td className="mono">{fmtDate(dev.last_seen_at)}</td>
                 <td className="right">
-                  {!dev.is_revoked && (
+                  {dev.is_revoked ? (
+                    <button onClick={() => guard(() => api.reinstateDevice(dev.hardware_uuid))}>
+                      Restablecer
+                    </button>
+                  ) : (
                     <button
                       className="danger"
                       onClick={() => guard(() => api.revokeDevice(dev.hardware_uuid))}

@@ -125,6 +125,8 @@ export const api = {
     }),
   revokeDevice: (hw: string) =>
     req<Device>(`/admin/devices/${encodeURIComponent(hw)}/revoke`, { method: "POST" }),
+  reinstateDevice: (hw: string) =>
+    req<Device>(`/admin/devices/${encodeURIComponent(hw)}/reinstate`, { method: "POST" }),
   deleteTenant: (id: number, adminPassword: string) =>
     req<void>(`/admin/tenants/${id}`, {
       method: "DELETE",

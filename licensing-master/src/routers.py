@@ -169,6 +169,15 @@ def revoke_device(
     return ok(service.admin_revoke_device(uow.connection, ident.email, hardware_uuid))
 
 
+@admin.post("/devices/{hardware_uuid}/reinstate", response_model=Envelope)
+def reinstate_device(
+    hardware_uuid: str,
+    uow: Annotated[UnitOfWork, Depends(get_write_uow)],
+    ident: Annotated[AdminIdentity, Depends(admin_identity)],
+) -> Envelope:
+    return ok(service.admin_reinstate_device(uow.connection, ident.email, hardware_uuid))
+
+
 @admin.get("/audit", response_model=Envelope)
 def audit(
     conn: Annotated[Connection, Depends(get_read_connection)],

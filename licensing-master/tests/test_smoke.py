@@ -36,7 +36,7 @@ def test_full_lifecycle(client: TestClient) -> None:
     r = client.post(
         "/admin/tenants",
         headers=H,
-        json={"product_code": "farmacia", "slug": slug, "name": "Smoke Co", "seat_limit": 2},
+        json={"product_code": "farmacia", "slug": slug, "name": "Smoke Co", "seat_limit": 2, "base_url": "smoke.example.com"},
     )
     assert r.status_code == 201, r.text
     tid = r.json()["data"]["tenant"]["tenant_id"]
