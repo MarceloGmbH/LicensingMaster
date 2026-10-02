@@ -63,6 +63,7 @@ services:
       LM_DEFAULT_WINDOW_DAYS: ${LM_DEFAULT_WINDOW_DAYS:-30}
       LM_DEFAULT_GRACE_DAYS: ${LM_DEFAULT_GRACE_DAYS:-5}
       LM_DEFAULT_SEAT_LIMIT: ${LM_DEFAULT_SEAT_LIMIT:-5}
+      LM_ADMIN_DELETE_PASSWORD: ${LM_ADMIN_DELETE_PASSWORD:-}
       CORS_ORIGINS: ${LM_CORS_ORIGINS:-["*"]}
     # Published for curl verification and for an external reverse proxy (e.g. a
     # shared Traefik) when you route ingress that way instead of the bundled
