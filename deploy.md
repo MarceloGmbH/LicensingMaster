@@ -182,3 +182,24 @@ Only `licensing-db` holds state. `pg_dump` it on a schedule:
 docker compose -f docker-compose.licensing.yml exec licensing-db \
   pg_dump -U postgres sistema_farmacia_licensing | gzip > licensing-$(date +%F).sql.gz
 ```
+
+
+---
+
+## Hardening notes (audit A3)
+
+- **Signing key is mandatory in production.** Generate it once with
+  `python licensing-master/scripts/gen_ed25519_keypair.py`; put the private value
+  in `LM_ED25519_PRIVATE_KEY_B64` and the public value in the desktop build's
+  `VITE_DEVICE_CONFIG_PUBKEY`. The container exits at startup if it is missing
+  or malformed (unless `LM_APP_ENV=development`).
+- **Client IP for rate limiting.** The limiter keys on `request.client.host`,
+  which uvicorn rewrites from `X-Forwarded-For` only when the TCP peer is in
+  `--forwarded-allow-ips` (`LM_FORWARDED_ALLOW_IPS`, default `*`). Traefik gets
+  the real IP via PROXY protocol from HAProxy and must **overwrite** (not trust
+  client-supplied) `X-Forwarded-For`. Set `LM_FORWARDED_ALLOW_IPS` to Traefik's
+  address/CIDR so uvicorn takes the rightmost untrusted hop; with `*` it takes
+  the leftmost entry, which a client can forge if the proxy appends to a
+  client-supplied header. If Traefik's IP is not trusted, every client shares
+  Traefik's IP and one attacker can lock out everyone.
+- Tenant `base_url` must be `https://` outside development.

@@ -44,9 +44,17 @@ services:
       APP_ENV: ${LM_APP_ENV:-production}
       APP_DEBUG: "false"
       LM_DATABASE_URL: postgresql+psycopg://${LM_POSTGRES_USER:-postgres}:${LM_POSTGRES_PASSWORD}@licensing-db:5432/${LM_POSTGRES_DB:-sistema_farmacia_licensing}
-      # Ed25519 private key (base64, 32 raw bytes). Empty -> deterministic dev
-      # signer; set a real key before shipping device_config.dat to clients.
+      # Ed25519 private key (base64, 32 raw bytes). REQUIRED unless
+      # LM_APP_ENV=development: the service refuses to start without it.
       LM_ED25519_PRIVATE_KEY_B64: ${LM_ED25519_PRIVATE_KEY_B64:-}
+      # Brute-force throttling + trusted proxy hops (see .env.example).
+      LM_ACTIVATE_MAX_FAILURES: ${LM_ACTIVATE_MAX_FAILURES:-10}
+      LM_ACTIVATE_FAILURE_WINDOW_SECONDS: ${LM_ACTIVATE_FAILURE_WINDOW_SECONDS:-600}
+      LM_ACTIVATE_LOCKOUT_SECONDS: ${LM_ACTIVATE_LOCKOUT_SECONDS:-900}
+      LM_CP_AUTH_MAX_FAILURES: ${LM_CP_AUTH_MAX_FAILURES:-20}
+      LM_CP_AUTH_FAILURE_WINDOW_SECONDS: ${LM_CP_AUTH_FAILURE_WINDOW_SECONDS:-600}
+      LM_CP_AUTH_LOCKOUT_SECONDS: ${LM_CP_AUTH_LOCKOUT_SECONDS:-900}
+      LM_FORWARDED_ALLOW_IPS: ${LM_FORWARDED_ALLOW_IPS:-*}
       # Cloudflare Access — verifies the JWT the tunnel injects on /admin/* and /.
       # Required in production; may be empty for an LM_APP_ENV=development smoke.
       LM_ACCESS_TEAM_DOMAIN: ${LM_ACCESS_TEAM_DOMAIN:-}

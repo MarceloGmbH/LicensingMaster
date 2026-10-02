@@ -2,8 +2,24 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+import base64
+import binascii
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_ed25519_private_key(key_b64: str):
+    """Decode a base64 raw 32-byte Ed25519 private key; ValueError if unusable."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    try:
+        raw = base64.b64decode(key_b64.strip(), validate=True)
+        return Ed25519PrivateKey.from_private_bytes(raw)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(
+            "LM_ED25519_PRIVATE_KEY_B64 must be base64 of a raw 32-byte Ed25519 private key"
+        ) from exc
 
 
 class Settings(BaseSettings):
@@ -20,7 +36,8 @@ class Settings(BaseSettings):
     )
 
     # Ed25519 private key (base64, 32 raw bytes) used to sign device_config.dat.
-    # Empty -> a deterministic dev signer (DEVCFG:<sha256>) is used instead.
+    # REQUIRED outside development/test (startup fails without a valid key).
+    # In dev/test only, empty -> a deterministic DEVCFG:<sha256> digest is used.
     LM_ED25519_PRIVATE_KEY_B64: str = ""
 
     # Cloudflare Access (human auth for /admin/*). The portal sits behind a
@@ -40,6 +57,27 @@ class Settings(BaseSettings):
     LM_ADMIN_DELETE_PASSWORD: str = ""
 
     CORS_ORIGINS: list[str] = ["*"]
+
+    # Brute-force throttling (in-memory, per client IP, single process).
+    # Public POST /activate: FAILED token attempts only.
+    LM_ACTIVATE_MAX_FAILURES: int = Field(default=10, ge=1)
+    LM_ACTIVATE_FAILURE_WINDOW_SECONDS: int = Field(default=600, ge=1)
+    LM_ACTIVATE_LOCKOUT_SECONDS: int = Field(default=900, ge=1)
+    # /cp/* service-token authentication failures.
+    LM_CP_AUTH_MAX_FAILURES: int = Field(default=20, ge=1)
+    LM_CP_AUTH_FAILURE_WINDOW_SECONDS: int = Field(default=600, ge=1)
+    LM_CP_AUTH_LOCKOUT_SECONDS: int = Field(default=900, ge=1)
+
+    @model_validator(mode="after")
+    def _signing_key_required_outside_dev(self) -> "Settings":
+        if self.LM_ED25519_PRIVATE_KEY_B64.strip():
+            parse_ed25519_private_key(self.LM_ED25519_PRIVATE_KEY_B64)  # invalid -> startup error
+        elif not self.is_dev:
+            raise ValueError(
+                "LM_ED25519_PRIVATE_KEY_B64 is required when APP_ENV is not development/test "
+                "(see scripts/gen_ed25519_keypair.py)"
+            )
+        return self
 
     @property
     def admin_emails(self) -> set[str]:

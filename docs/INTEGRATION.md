@@ -115,7 +115,9 @@ is `valid: false`.
   ticks up. A revoked device hands its seat back.
 - **Obtain:** operator, portal → tenant → **Generar token** (pick the quota).
   (API: `POST /admin/tenants/{tenant_id}/batch-tokens` with `{"quota": N,
-  "expires_at": "<iso>"?, "note": "..."?}`.)
+  "expires_at": "<iso>"?, "note": "..."?}`.) Format:
+  `BATCH-<PRODUCT>-<SLUG>-<22 url-safe chars>` (128-bit random part; tokens
+  issued before this change had 32 bits and should be revoked and reissued).
 - **Lifetime:** optional `expires_at`; revoke any time via `POST
   /admin/batch-tokens/{id}/revoke`.
 - **Sensitivity:** lower than a service token (quota-bounded, tenant-scoped, no
@@ -199,12 +201,17 @@ Response `data`:
 - `license_key` is `LIC-` + 43 url-safe chars. **Store it** — it is required for
   `heartbeat` and `verify`.
 - `device_config` is a JSON string: `{"payload": {...}, "signature": "..."}`.
-  Signature is `ed25519:<b64>` in production, or `DEVCFG:<sha256-32>` when the
-  service runs without a signing key. Persist it verbatim; treat an unverifiable
+  Signature is `ed25519:<b64>` in production. `DEVCFG:<sha256-32>` is only ever
+  produced by a development/test service without a key; in production the
+  service refuses to start without `LM_ED25519_PRIVATE_KEY_B64`. Persist it verbatim; treat an unverifiable
   signature as "cannot confirm" rather than "invalid" if you have no public key.
-- `reactivated: true` means the uuid already had a live seat — same key returned,
-  no new seat consumed.
-- Re-run with the same uuid any time to refresh `valid_until` (idempotent).
+- `reactivated: true` means the uuid already had a live seat of THIS tenant: no
+  new seat is consumed, `valid_until` is refreshed and the `license_key` is
+  **rotated** — the response carries a new key (and a freshly signed
+  `device_config` with `"reactivated": true`); the previous key stops passing
+  `verify`/`heartbeat`. Always persist the newest key.
+- If the uuid is already bound to a *different* tenant: `409
+  DEVICE_BOUND_TO_OTHER_TENANT`, and no key is returned.
 
 ### 4.5 `POST /cp/devices/heartbeat`
 
@@ -282,6 +289,15 @@ Same request/response as `4.4`, but **unauthenticated** — the batch token is t
 only credential. This is what a fresh install calls before it has anything else.
 Extra guard: `403 FORBIDDEN` if the tenant is not `ACTIVE`.
 
+Throttling: failed attempts (`ACTIVATION_TOKEN_INVALID`) are counted per client
+IP; after `LM_ACTIVATE_MAX_FAILURES` (default 10) within
+`LM_ACTIVATE_FAILURE_WINDOW_SECONDS` (600) the IP is locked out for
+`LM_ACTIVATE_LOCKOUT_SECONDS` (900): `429 TOO_MANY_ATTEMPTS` with a
+`Retry-After` header. Repeated `/cp/*` service-token failures are throttled the
+same way (`LM_CP_AUTH_*`, default 20 failures). State is in-memory (one process).
+Behind the reverse proxy the real client IP comes from uvicorn's proxy-headers
+handling: set `LM_FORWARDED_ALLOW_IPS` to the proxy's IP/CIDR (see `deploy.md`).
+
 ```bash
 curl -s -X POST https://licensing-cp.alanadev.com/activate \
   -H 'Content-Type: application/json' \
@@ -300,6 +316,8 @@ curl -s -X POST https://licensing-cp.alanadev.com/activate \
 | 404 | `NOT_FOUND` | uuid not activated (heartbeat), tenant/subscription missing |
 | 409 | `CONFLICT` | slug already exists (admin) |
 | 409 | `SEAT_LIMIT_REACHED` | `seat_limit` or token `quota` reached |
+| 409 | `DEVICE_BOUND_TO_OTHER_TENANT` | `hardware_uuid` already active under another tenant |
+| 429 | `TOO_MANY_ATTEMPTS` | too many failed `/activate` or `/cp/*` auth attempts from this IP (`Retry-After`) |
 | 422 | `SCHEMA_VALIDATION` | malformed body / missing required key |
 
 ---

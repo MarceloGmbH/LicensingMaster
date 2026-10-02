@@ -22,6 +22,7 @@ from src.config import settings
 from src.errors import (
     ActivationTokenInvalidError,
     ConflictError,
+    DeviceBoundToOtherTenantError,
     ForbiddenError,
     NotFoundError,
     SeatLimitReachedError,
@@ -89,6 +90,9 @@ def _norm_base_url(raw: str | None) -> str | None:
         return None
     if not u.startswith(("http://", "https://")):
         u = "https://" + u
+    if u.startswith("http://") and not settings.is_dev:
+        # The URL becomes the terminal's API endpoint inside the signed config.
+        raise ValidationError(message="base_url must use https:// in production", field="base_url")
     return u.rstrip("/").removesuffix("/api/v1").rstrip("/")
 
 
@@ -289,7 +293,9 @@ def admin_generate_batch_token(conn: Connection, actor: str, tenant_id: int, bod
     quota = int(body.get("quota") or 0)
     if quota <= 0:
         raise ValidationError(message="quota must be > 0", field="quota")
-    token = f"BATCH-{t['product_code'].upper()}-{t['slug'].upper()}-{secrets.token_hex(4).upper()}"
+    # 128 bits of entropy (token_urlsafe(16) = 22 base64url chars); the readable
+    # prefix is cosmetic and never counted as secret material.
+    token = f"BATCH-{t['product_code'].upper()}-{t['slug'].upper()}-{secrets.token_urlsafe(16)}"
     expires_at = body.get("expires_at")
     row = conn.execute(
         batch_tokens.insert()
@@ -679,13 +685,31 @@ def _do_activate(conn: Connection, t: dict, sub: dict, tok: dict, body: dict, no
         .first()
     )
     if existing is not None and not existing["is_revoked"]:
-        # Idempotent re-activation — refresh, no new seat.
+        # A token only proves ownership of ITS tenant: never hand out (or rotate)
+        # the key of a device bound to a different tenant.
+        if existing["tenant_id"] != t["tenant_id"]:
+            raise DeviceBoundToOtherTenantError()
+        # Reactivation: no new seat, but the license_key is ROTATED so the
+        # previously issued key stops verifying (cp_verify_device / heartbeat
+        # compare against the stored key).
         row = conn.execute(
             device_activations.update()
             .where(device_activations.c.hardware_uuid == hw)
-            .values(valid_until=now + timedelta(days=int(sub["window_days"])), last_seen_at=now)
+            .values(
+                license_key="LIC-" + secrets.token_urlsafe(32),
+                valid_until=now + timedelta(days=int(sub["window_days"])),
+                last_seen_at=now,
+            )
             .returning(device_activations)
         ).mappings().one()
+        _audit(
+            conn,
+            f"activate:{t['slug']}",
+            "device.license_rotate",
+            "device_activation",
+            hw,
+            {"activated_via": tok["batch_token_id"]},
+        )
         return _activation_result(dict(row), t, now, reactivated=True)
 
     _ensure_tenant_seat(conn, t["tenant_id"], sub)
@@ -770,6 +794,8 @@ def _activation_result(dev: dict, tenant: dict, now: datetime, *, reactivated: b
         "valid_until": _iso(dev["valid_until"]),
         "issued_at": _iso(now),
     }
+    if reactivated:
+        payload["reactivated"] = True
     return {
         "device": {**dev, "valid_from": _iso(dev["valid_from"]), "valid_until": _iso(dev["valid_until"])},
         "tenant_slug": tenant["slug"],

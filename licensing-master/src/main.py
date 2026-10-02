@@ -40,7 +40,9 @@ app.add_middleware(
 @app.exception_handler(AppError)
 async def _app_error(_: Request, exc: AppError) -> JSONResponse:
     body: Envelope = fail(exc.to_error_detail())
-    return JSONResponse(status_code=exc.status_code, content=body.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=exc.status_code, content=body.model_dump(mode="json"), headers=exc.headers
+    )
 
 
 @app.exception_handler(RequestValidationError)

@@ -17,11 +17,13 @@ class AppError(Exception):
         message: str | None = None,
         field: str | None = None,
         context: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         if message:
             self.message = message
         self.field = field
         self.context = context
+        self.headers = headers
         super().__init__(self.message)
 
     def to_error_detail(self) -> ErrorDetail:
@@ -68,3 +70,14 @@ class SeatLimitReachedError(ConflictError):
 class ActivationTokenInvalidError(ForbiddenError):
     code = "ACTIVATION_TOKEN_INVALID"
     message = "The activation token is invalid, revoked or exhausted"
+
+
+class DeviceBoundToOtherTenantError(ConflictError):
+    code = "DEVICE_BOUND_TO_OTHER_TENANT"
+    message = "This device is already bound to another tenant"
+
+
+class TooManyAttemptsError(AppError):
+    status_code = 429
+    code = "TOO_MANY_ATTEMPTS"
+    message = "Too many failed attempts; try again later"

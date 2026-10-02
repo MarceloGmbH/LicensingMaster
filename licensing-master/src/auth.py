@@ -23,7 +23,8 @@ from sqlalchemy.engine import Connection
 
 from src.config import settings
 from src.db import get_read_connection
-from src.errors import ForbiddenError, UnauthorizedError
+from src import ratelimit
+from src.errors import ForbiddenError, TooManyAttemptsError, UnauthorizedError
 from src.tables import service_tokens
 
 # --- Cloudflare Access -----------------------------------------------------
@@ -112,10 +113,16 @@ def _hash(raw: str) -> str:
 
 
 def service_identity(
+    request: Request,
     authorization: str | None = Header(default=None),
     conn: Connection = Depends(get_read_connection),
 ) -> ServiceIdentity:
+    ip = ratelimit.client_ip(request)
+    wait = ratelimit.service_auth_limiter.retry_after(ip)
+    if wait:
+        raise TooManyAttemptsError(headers={"Retry-After": str(wait)})
     if not authorization or not authorization.lower().startswith("bearer "):
+        ratelimit.service_auth_limiter.record_failure(ip)
         raise UnauthorizedError(message="Missing service token")
     raw = authorization.split(" ", 1)[1].strip()
     row = (
@@ -129,6 +136,7 @@ def service_identity(
         .first()
     )
     if row is None:
+        ratelimit.service_auth_limiter.record_failure(ip)
         raise ForbiddenError(message="Invalid or revoked service token")
     return ServiceIdentity(
         service_token_id=row["service_token_id"],

@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from sqlalchemy.engine import Connection
 
-from src import service
+from src import ratelimit, service
 from src.auth import AdminIdentity, ServiceIdentity, admin_identity, service_identity
 from src.config import settings
 from src.db import UnitOfWork, get_read_connection, get_write_uow
 from src.envelope import Envelope, ok
-from src.errors import ForbiddenError
+from src.errors import ActivationTokenInvalidError, ForbiddenError, TooManyAttemptsError
 
 router = APIRouter()
 
@@ -22,14 +22,29 @@ def health() -> dict:
     return {"status": "ok", "service": "licensing-master"}
 
 
+def _activation_gate(request: Request) -> str:
+    """Reject locked-out client IPs before any DB work. Returns the client IP."""
+    ip = ratelimit.client_ip(request)
+    wait = ratelimit.activation_limiter.retry_after(ip)
+    if wait:
+        raise TooManyAttemptsError(headers={"Retry-After": str(wait)})
+    return ip
+
+
 @router.post("/activate", response_model=Envelope, status_code=201, tags=["activation"])
 def activate(
+    ip: Annotated[str, Depends(_activation_gate)],
     uow: Annotated[UnitOfWork, Depends(get_write_uow)],
     body: Annotated[dict, Body()],
 ) -> Envelope:
     """First-run terminal activation. Unauthenticated — batch-token-gated. MUST
-    be reachable without Cloudflare Access (ADR-0015)."""
-    return ok(service.public_activate(uow.connection, body))
+    be reachable without Cloudflare Access (ADR-0015). Failed token attempts
+    are throttled per client IP (429 TOO_MANY_ATTEMPTS)."""
+    try:
+        return ok(service.public_activate(uow.connection, body))
+    except ActivationTokenInvalidError:
+        ratelimit.activation_limiter.record_failure(ip)
+        raise
 
 
 # ---- admin (Cloudflare Access) -----------------------------------------
