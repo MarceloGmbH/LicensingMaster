@@ -9,14 +9,18 @@ Two hostnames:
 
 | Hostname | Serves | Auth |
 |---|---|---|
-| `licensing.alanadev.com` | the portal + `/admin/*` | **network restriction (LAN/VPN only, at Traefik)** + **native login** (password + TOTP) |
+| `licensing.alanadev.com` | the portal + `/admin/*` | **native login** (password + mandatory TOTP); public, DNS-only (no Cloudflare proxy) |
 | `licensing-cp.alanadev.com` | `/cp/*` and `/activate` only | **service token** / batch token (product backends, first-run clients) |
 
-> **The admin host MUST be network-restricted.** The portal is the business's
-> master key (mints licences, revokes devices, deletes tenants). Restrict
-> `licensing.alanadev.com` to the LAN/VPN with a Traefik `ipAllowList`
-> middleware; the login below is the *second* barrier, not the only one. The
-> `-cp` host stays public: machines call it and have no browser session.
+> **The admin host is public by operator decision (2026-10-03).** The portal is
+> the business's master key (mints licences, revokes devices, deletes tenants),
+> so the native login is its only barrier: argon2id password + mandatory TOTP,
+> per-email and per-IP lockout, CSRF header, audited logins. Keep the DNS record
+> **DNS-only (grey cloud)**: behind the Cloudflare proxy the app sees Cloudflare
+> IPs and the per-IP lockout stops working. To restrict it later, attach a
+> Traefik `ipAllowList` to its router (the vm-gateway firewall must then also
+> accept 443 from those networks). The `-cp` host stays public: machines call
+> it and have no browser session.
 
 `/cp/*` cannot sit behind a login wall: product backends authenticate with a
 bearer service token that `licensing-master` hashes and checks against
@@ -83,11 +87,10 @@ service — the network restriction in step 4 is what makes them behave differen
 Cloudflare Access is no longer used. Do **not** create an Access application for
 either hostname (an Access app on `-cp` would also break `/cp/*`).
 
-**Network restriction (Traefik, not this repo).** Attach an `ipAllowList`
-middleware with your LAN/VPN CIDRs to the router of `licensing.alanadev.com`.
-Keep `licensing-cp.alanadev.com` on a separate, unrestricted router. Set
-`LM_FORWARDED_ALLOW_IPS` to Traefik's address (see Hardening notes) so lockouts
-and audit rows use the real client IP.
+**Client IP.** Both hostnames are DNS-only and reach Traefik through the VPS
+HAProxy with PROXY protocol, so the app sees the real client IP (verified
+2026-10-03). Keep `licensing-cp.alanadev.com` on a router that serves only
+`/cp`, `/activate` and `/health`, and the admin router excluding those paths.
 
 **Migrations** run automatically at container start (`entrypoint.sh` →
 `alembic upgrade head`); revision `0003_admin_auth` creates
@@ -137,8 +140,9 @@ Behaviour and settings (all `LM_ADMIN_*`, see `.env.example`):
 
 ### Verifying
 
-- `https://licensing.alanadev.com` from the LAN/VPN → login form; from outside
-  → blocked by Traefik.
+- `https://licensing.alanadev.com` → login form; six bad logins for one email
+  → the sixth returns `429 TOO_MANY_ATTEMPTS`; a POST without
+  `X-Requested-With: lm-portal` → `403`.
 - `curl -s https://licensing.alanadev.com/admin/auth/me` → `401` without a session.
 - `curl https://licensing-cp.alanadev.com/health` → `{"status":"ok",...}` with
   no login wall; `curl .../cp/subscription` → `401` JSON (not HTML).
