@@ -1,19 +1,26 @@
-# Deploying `licensing-master` behind Cloudflare Tunnel + Access
+# Deploying `licensing-master`
 
 The central licensing control plane (ADR-0013). One deployable: Postgres +
-FastAPI (`licensing-master`, portal bundled at `/`) + a `cloudflared` connector.
-No public IP, no published ports — the only ingress is the tunnel.
+FastAPI (`licensing-master`, portal bundled at `/`). Ingress is the shared
+Traefik; a `cloudflared` tunnel connector is available but dormant
+(`--profile tunnel`).
 
-Two hostnames, one tunnel:
+Two hostnames:
 
 | Hostname | Serves | Auth |
 |---|---|---|
-| `licensing.alanadev.com` | the portal + `/admin/*` | **Cloudflare Access** (only you) |
-| `licensing-cp.alanadev.com` | `/cp/*` only | **service token** (product backends) — Access must NOT cover this |
+| `licensing.alanadev.com` | the portal + `/admin/*` | **network restriction (LAN/VPN only, at Traefik)** + **native login** (password + TOTP) |
+| `licensing-cp.alanadev.com` | `/cp/*` and `/activate` only | **service token** / batch token (product backends, first-run clients) |
 
-`/cp/*` cannot sit behind Access: product backends are machines, they have no
-browser session. They authenticate with a bearer service token that
-`licensing-master` hashes and checks against `licensing.service_tokens`.
+> **The admin host MUST be network-restricted.** The portal is the business's
+> master key (mints licences, revokes devices, deletes tenants). Restrict
+> `licensing.alanadev.com` to the LAN/VPN with a Traefik `ipAllowList`
+> middleware; the login below is the *second* barrier, not the only one. The
+> `-cp` host stays public: machines call it and have no browser session.
+
+`/cp/*` cannot sit behind a login wall: product backends authenticate with a
+bearer service token that `licensing-master` hashes and checks against
+`licensing.service_tokens`.
 
 ---
 
@@ -21,20 +28,21 @@ browser session. They authenticate with a bearer service token that
 
 ```bash
 cp .env.licensing.example .env.licensing
-# fill in: LM_POSTGRES_PASSWORD, LM_ADMIN_EMAILS, LM_ACCESS_TEAM_DOMAIN,
-#          LM_ACCESS_AUD (step 4), CF_TUNNEL_TOKEN (step 2)
+# fill in: LM_POSTGRES_PASSWORD, LM_ED25519_PRIVATE_KEY_B64
+#          (+ CF_TUNNEL_TOKEN only if you use the tunnel profile, step 2)
 
 docker compose --env-file .env.licensing -f docker-compose.licensing.yml up -d --build
 ```
 
 `entrypoint.sh` runs `alembic upgrade head` on start, so the schema and the
 `farmacia` / `hotel` / `pos_pub` product rows are seeded automatically. The
-`licensing-master` container listens on `:8000` on the internal `lm` network
-only — `cloudflared` is the sole thing that reaches it.
+`licensing-master` container listens on `:8000`; it is published on
+`LM_BIND_ADDR:LM_HOST_PORT` for Traefik (or reached by `cloudflared` on the
+internal `lm` network when the tunnel profile is used).
 
 ---
 
-## 2. Create the tunnel (Cloudflare dashboard)
+## 2. (Optional) Create the tunnel (Cloudflare dashboard)
 
 **Zero Trust → Networks → Tunnels → Create a tunnel**
 
@@ -62,70 +70,78 @@ On the tunnel's **Public Hostname** tab, add two:
 
 `licensing-master` is the compose service name; `cloudflared` resolves it on
 the shared `lm` network. Cloudflare creates the two proxied `CNAME`s in DNS for
-you (both point at `<tunnel-id>.cfargotunnel.com`).
+you (both point at `<tunnel-id>.cfargotunnel.com`). (Only for the optional tunnel
+profile; with Traefik, route both hostnames there instead.)
 
 The app routes by path internally, so both hostnames can target the same
-service — Access on the next step is what makes them behave differently.
+service — the network restriction in step 4 is what makes them behave differently.
 
 ---
 
-## 4. Cloudflare Access application for the portal
+## 4. Admin login (native password + TOTP) and network restriction
 
-> Dashboard note (2026): the old **Access → Applications → Add an application**
-> path is now **Access controls → Applications → Create new application →
-> Self-hosted and private**. A Cloudflare Tunnel is NOT required here — the
-> hostname just has to be publicly routable (it is, via the proxied DNS record /
-> your reverse proxy).
+Cloudflare Access is no longer used. Do **not** create an Access application for
+either hostname (an Access app on `-cp` would also break `/cp/*`).
 
-**Step 0 — onboard Zero Trust once.** If the left nav has no "Access controls",
-open `one.dash.cloudflare.com`, pick a team name (this becomes
-`<team>.cloudflareaccess.com`) and the free plan.
+**Network restriction (Traefik, not this repo).** Attach an `ipAllowList`
+middleware with your LAN/VPN CIDRs to the router of `licensing.alanadev.com`.
+Keep `licensing-cp.alanadev.com` on a separate, unrestricted router. Set
+`LM_FORWARDED_ALLOW_IPS` to Traefik's address (see Hardening notes) so lockouts
+and audit rows use the real client IP.
 
-**Step 1 — a login method.** Zero Trust → **Settings → Authentication → Login
-methods**. If you have no identity provider, add **One-time PIN** (email code,
-zero setup).
+**Migrations** run automatically at container start (`entrypoint.sh` →
+`alembic upgrade head`); revision `0003_admin_auth` creates
+`licensing.admin_users` and `licensing.admin_sessions`.
 
-**Step 2 — create the application.** Zero Trust → **Access controls →
-Applications → Create new application → Self-hosted and private**:
+**Bootstrap the first admin** (no admin exists after the upgrade, so the portal
+cannot be used until you do this). Inside the running container:
 
-- **Application name:** `Licensing portal`
-- **Domain:** subdomain `licensing`, domain `alanadev.com`, path blank
-  → covers the portal AND `/admin/*`, and does **not** touch
-  `licensing-cp.alanadev.com`.
-- **Session duration:** 24h (your call)
-- **Access policies → create a policy:**
-  - **Name:** `Only me`
-  - **Action:** Allow
-  - **Add a rule → Include →** selector **Emails** → `marcelogh.teamviewer@gmail.com`
-    (more operators later; keep them in `LM_ADMIN_EMAILS` too — `licensing-master`
-    re-checks the email after verifying the JWT, defence in depth).
-- Create the application.
+```bash
+docker exec -it <licensing-master-container> python -m src.cli create-admin --email you@example.com
+```
 
-**Step 3 — copy the AUD.** Back on **Applications**, click **Configure** on
-`Licensing portal` → **Overview** tab (or **Additional settings**) → copy the
-**Application Audience (AUD) Tag** → `.env.licensing` as `LM_ACCESS_AUD=...`.
+It prompts for a password twice (min 12 characters), then prints the
+`otpauth://` URI, an ASCII QR code and the base32 secret **once**. Scan the QR
+with an authenticator app (or paste the secret). Log in at the portal with
+email + password + the 6-digit code.
 
-**Team domain:** Zero Trust → **Settings** (top of the page, "Team domain"), e.g.
-`alanadev.cloudflareaccess.com` → `.env.licensing` as `LM_ACCESS_TEAM_DOMAIN=...`.
+Other operator commands (`docker exec -it <container> python -m src.cli ...`):
 
-Then set `LM_APP_ENV=production` in `.env.licensing` and
-`docker compose --env-file .env.licensing -f docker-compose.licensing.yml up -d`.
-`licensing-master` fetches the JWKS from
-`https://<team>/cdn-cgi/access/certs` to verify `Cf-Access-Jwt-Assertion`.
+| Command | Effect |
+|---|---|
+| `create-admin --email X` | new admin + TOTP enrolment |
+| `reset-password --email X` | new password; revokes the admin's sessions |
+| `reset-totp --email X` | new TOTP secret (lost phone); revokes sessions |
+| `disable-admin --email X` / `enable-admin --email X` | deactivate / reactivate; disabling revokes sessions |
+| `revoke-sessions --email X` | log the admin out everywhere |
+| `list-admins` | accounts, state and last login (no secrets) |
 
-> Do **not** create an Access application for `licensing-cp.alanadev.com`.
-> If you ever do, `/cp/*` calls from the product backends will get the Access
-> login page instead of JSON.
+Behaviour and settings (all `LM_ADMIN_*`, see `.env.example`):
+
+- Sessions live in the database (`lm_session` cookie: HttpOnly, Secure unless
+  `LM_APP_ENV` is a dev value, SameSite=Strict). Idle timeout 30 min (sliding),
+  absolute 8 h.
+- 5 failed logins per e-mail / 15 min lock that e-mail for 15 min; 10 per client
+  IP likewise → `429 TOO_MANY_ATTEMPTS` + `Retry-After`. Wrong re-entered
+  passwords on tenant deletion count the same way.
+- A TOTP code can be used once (replay rejected).
+- Every state-changing `/admin/*` request needs `X-Requested-With: lm-portal`
+  (sent by the portal) in addition to SameSite=Strict.
+- Deleting a tenant asks for the logged-in admin's **own** password. The old
+  shared `LM_ADMIN_DELETE_PASSWORD` is gone.
+- Audit actions: `admin.login`, `admin.login_failed`, `admin.logout` (admin
+  email as actor; no password or code is ever logged), plus `admin.*` rows for
+  CLI changes (actor `cli`).
+- Removed settings: `LM_ACCESS_TEAM_DOMAIN`, `LM_ACCESS_AUD`, `LM_ADMIN_EMAILS`,
+  `LM_ADMIN_DELETE_PASSWORD`. Delete them from your `.env`.
 
 ### Verifying
 
-- `https://licensing.alanadev.com` → Cloudflare login → the portal.
-  `GET /admin/me` should echo your email.
+- `https://licensing.alanadev.com` from the LAN/VPN → login form; from outside
+  → blocked by Traefik.
+- `curl -s https://licensing.alanadev.com/admin/auth/me` → `401` without a session.
 - `curl https://licensing-cp.alanadev.com/health` → `{"status":"ok",...}` with
-  no login wall.
-- `curl https://licensing-cp.alanadev.com/cp/subscription` → `401` (needs the
-  bearer token) — **not** an HTML login page. If you get HTML, an Access app is
-  covering the `-cp` host; remove it.
+  no login wall; `curl .../cp/subscription` → `401` JSON (not HTML).
 
 ---
 

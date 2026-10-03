@@ -31,7 +31,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    # Credentialed CORS only for an explicit origin list; the portal is same-origin
+    # and needs no CORS at all.
+    allow_credentials="*" not in settings.CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -63,7 +65,7 @@ app.include_router(router)
 
 # The built portal (apps/licensing-portal -> dist) is copied to /app/portal by the
 # Docker image. When present it is served at "/" on the same origin as /admin/*,
-# so Cloudflare Access protects the UI and its API with one policy. When absent
+# so the session cookie and the API share one origin. When absent
 # (bare `uvicorn` in dev — use the Vite dev server on :5190 instead) "/" just
 # reports the service banner.
 _PORTAL_DIR = Path(__file__).resolve().parent.parent / "portal"

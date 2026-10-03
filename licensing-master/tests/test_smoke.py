@@ -16,26 +16,16 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("LM_DATABASE_URL"), reason="LM_DATABASE_URL not set"
 )
 
-H = {"X-Dev-Admin-Email": "tester@alanadev.com"}
-
-
-@pytest.fixture()
-def client() -> TestClient:
-    from src.main import app
-
-    return TestClient(app)
-
 
 def test_full_lifecycle(client: TestClient) -> None:
     slug = f"t{uuid.uuid4().hex[:8]}"
 
     assert client.get("/health").json()["status"] == "ok"
-    assert client.get("/admin/me", headers=H).json()["data"]["email"] == "tester@alanadev.com"
-    assert "farmacia" in [p["code"] for p in client.get("/admin/products", headers=H).json()["data"]["items"]]
+    assert client.get("/admin/auth/me").json()["data"]["email"] == "tester@alanadev.com"
+    assert "farmacia" in [p["code"] for p in client.get("/admin/products").json()["data"]["items"]]
 
     r = client.post(
         "/admin/tenants",
-        headers=H,
         json={"product_code": "farmacia", "slug": slug, "name": "Smoke Co", "seat_limit": 2, "base_url": "smoke.example.com"},
     )
     assert r.status_code == 201, r.text
@@ -43,15 +33,15 @@ def test_full_lifecycle(client: TestClient) -> None:
 
     # set the tenant API URL (injected into device_config on central activation)
     patched = client.patch(
-        f"/admin/tenants/{tid}", headers=H, json={"base_url": "smoke.example.com/api/v1"}
+        f"/admin/tenants/{tid}", json={"base_url": "smoke.example.com/api/v1"}
     ).json()["data"]
     assert patched["tenant"]["base_url"] == "https://smoke.example.com"
 
     tok = client.post(
-        f"/admin/tenants/{tid}/batch-tokens", headers=H, json={"quota": 5}
+        f"/admin/tenants/{tid}/batch-tokens", json={"quota": 5}
     ).json()["data"]["token"]
     svc = client.post(
-        f"/admin/tenants/{tid}/service-tokens", headers=H, json={"name": "smoke"}
+        f"/admin/tenants/{tid}/service-tokens", json={"name": "smoke"}
     ).json()["data"]["token"]
     S = {"Authorization": f"Bearer {svc}"}
 
@@ -80,7 +70,7 @@ def test_full_lifecycle(client: TestClient) -> None:
     pd = pub.json()["data"]
     assert pd["tenant_base_url"] == "https://smoke.example.com"
     assert pd["license_key"].startswith("LIC-")
-    client.post(f"/admin/devices/{hw_pub}/revoke", headers=H)  # free that seat for the rest
+    client.post(f"/admin/devices/{hw_pub}/revoke")  # free that seat for the rest
 
     st = client.get("/cp/devices/status", headers=S, params={"hardware_uuid": hw}).json()["data"]
     assert st["state"] == "ACTIVE" and st["days_remaining"] >= 0
@@ -131,18 +121,18 @@ def test_full_lifecycle(client: TestClient) -> None:
         "/cp/seats/release", headers=S, json={"hardware_uuid": hw2}
     ).json()["data"]["released"] is True
 
-    detail = client.get(f"/admin/tenants/{tid}", headers=H).json()["data"]
+    detail = client.get(f"/admin/tenants/{tid}").json()["data"]
     assert detail["subscription"]["seats_used"] == 1
 
     before = detail["subscription"]["valid_until"]
     after = client.post(
-        f"/admin/tenants/{tid}/payments", headers=H, json={"amount": "100"}
+        f"/admin/tenants/{tid}/payments", json={"amount": "100"}
     ).json()["data"]["subscription"]["valid_until"]
     assert after > before
 
     # admin revoke frees the seat
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
     assert (
-        client.get(f"/admin/tenants/{tid}", headers=H).json()["data"]["subscription"]["seats_used"]
+        client.get(f"/admin/tenants/{tid}").json()["data"]["subscription"]["seats_used"]
         == 0
     )

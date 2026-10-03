@@ -1,10 +1,7 @@
 """Two auth surfaces (ADR-0013):
 
-* `admin_identity` — the human operator behind Cloudflare Access. Verifies the
-  `Cf-Access-Jwt-Assertion` header against Cloudflare's public keys (cached),
-  checking `aud` and an optional email allow-list. In a dev environment (no
-  `LM_ACCESS_TEAM_DOMAIN` set) it falls back to a plain `X-Dev-Admin-Email`
-  header so the portal is usable locally.
+* `admin_identity` — the human operator, logged in natively (password + TOTP,
+  see `admin_auth`) and carried by the HttpOnly `lm_session` cookie.
 * `service_identity` — a product backend calling `/cp/*` with a bearer token
   whose SHA-256 must match a non-revoked `licensing.service_tokens` row.
 """
@@ -12,42 +9,18 @@
 from __future__ import annotations
 
 import hashlib
-import time
 from dataclasses import dataclass
 
-import httpx
-import jwt
 from fastapi import Depends, Header, Request
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from src.config import settings
 from src.db import get_read_connection
-from src import ratelimit
+from src import admin_auth, ratelimit
 from src.errors import ForbiddenError, TooManyAttemptsError, UnauthorizedError
 from src.tables import service_tokens
 
-# --- Cloudflare Access -----------------------------------------------------
-
-_JWKS_CACHE: dict[str, tuple[float, list[dict]]] = {}
-_JWKS_TTL = 3600.0
-
-
-def _certs_url() -> str:
-    return f"https://{settings.LM_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs"
-
-
-async def _jwks() -> list[dict]:
-    now = time.time()
-    hit = _JWKS_CACHE.get("k")
-    if hit and now - hit[0] < _JWKS_TTL:
-        return hit[1]
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        resp = await client.get(_certs_url())
-        resp.raise_for_status()
-        keys = resp.json().get("keys", [])
-    _JWKS_CACHE["k"] = (now, keys)
-    return keys
+# --- Admin session (portal -> /admin/*) -------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,47 +28,33 @@ class AdminIdentity:
     email: str
 
 
-async def admin_identity(
+def admin_identity(
     request: Request,
-    cf_assertion: str | None = Header(default=None, alias="Cf-Access-Jwt-Assertion"),
-    dev_email: str | None = Header(default=None, alias="X-Dev-Admin-Email"),
+    conn: Connection = Depends(get_read_connection),
 ) -> AdminIdentity:
-    if not settings.LM_ACCESS_TEAM_DOMAIN:
-        # Dev: trust the header. NEVER reached in production (the setting is set).
-        if settings.is_dev and dev_email:
-            return AdminIdentity(email=dev_email.strip().lower())
-        raise UnauthorizedError(message="Cloudflare Access is not configured")
-
-    token = cf_assertion or request.cookies.get("CF_Authorization")
-    if not token:
-        raise UnauthorizedError(message="Missing Cloudflare Access assertion")
-
-    try:
-        header = jwt.get_unverified_header(token)
-        keys = await _jwks()
-        jwk = next((k for k in keys if k.get("kid") == header.get("kid")), None)
-        if jwk is None:
-            raise UnauthorizedError(message="Unknown Access signing key")
-        public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwk)
-        claims = jwt.decode(
-            token,
-            public_key,
-            algorithms=["RS256"],
-            audience=settings.LM_ACCESS_AUD or None,
-            options={"verify_aud": bool(settings.LM_ACCESS_AUD)},
-        )
-    except UnauthorizedError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - any JWT failure is a 401
-        raise UnauthorizedError(message=f"Invalid Access assertion: {exc}") from exc
-
-    email = str(claims.get("email", "")).strip().lower()
-    if not email:
-        raise ForbiddenError(message="Access assertion carries no email")
-    allow = settings.admin_emails
-    if allow and email not in allow:
-        raise ForbiddenError(message=f"{email} is not an authorised operator")
+    """The logged-in operator, from the `lm_session` cookie. The session must
+    exist, be unrevoked, inside its idle + absolute lifetime, and belong to an
+    active user; a valid request slides the idle timer."""
+    raw = request.cookies.get(admin_auth.SESSION_COOKIE)
+    email = admin_auth.resolve_session(conn, raw) if raw else None
+    conn.commit()  # persist the sliding last_seen_at
+    if email is None:
+        raise UnauthorizedError()
     return AdminIdentity(email=email)
+
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+CSRF_HEADER = "X-Requested-With"
+CSRF_VALUE = "lm-portal"
+
+
+def csrf_guard(request: Request) -> None:
+    """Defence in depth next to SameSite=Strict: every state-changing /admin/*
+    request must carry the header only the portal's own fetch wrapper sends
+    (a cross-site form post cannot set it, and a cross-origin fetch with it
+    needs a CORS preflight)."""
+    if request.method not in _SAFE_METHODS and request.headers.get(CSRF_HEADER) != CSRF_VALUE:
+        raise ForbiddenError(message=f"Missing or invalid {CSRF_HEADER} header")
 
 
 # --- Service token (product backends -> /cp/*) ---------------------------

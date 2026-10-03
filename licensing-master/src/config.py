@@ -40,21 +40,15 @@ class Settings(BaseSettings):
     # In dev/test only, empty -> a deterministic DEVCFG:<sha256> digest is used.
     LM_ED25519_PRIVATE_KEY_B64: str = ""
 
-    # Cloudflare Access (human auth for /admin/*). The portal sits behind a
-    # Cloudflare Tunnel + Access application; this service verifies the JWT it
-    # injects. Leave LM_ACCESS_TEAM_DOMAIN empty in dev to accept a plain
-    # `X-Dev-Admin-Email` header instead.
-    LM_ACCESS_TEAM_DOMAIN: str = ""  # e.g. "alanadev.cloudflareaccess.com"
-    LM_ACCESS_AUD: str = ""  # the Access application's AUD tag
-    LM_ADMIN_EMAILS: str = ""  # comma-separated allow-list; empty = any verified email
+    # Native admin login (password + TOTP). Sessions are server-side: idle
+    # timeout slides on every request, the absolute lifetime never extends.
+    LM_ADMIN_SESSION_IDLE_SECONDS: int = Field(default=30 * 60, ge=60)
+    LM_ADMIN_SESSION_ABSOLUTE_SECONDS: int = Field(default=8 * 3600, ge=60)
 
     # Subscription defaults for a freshly-created tenant.
     LM_DEFAULT_WINDOW_DAYS: int = 30
     LM_DEFAULT_GRACE_DAYS: int = 5
     LM_DEFAULT_SEAT_LIMIT: int = 5
-
-    # Admin delete tenant password (required for DELETE /admin/tenants/{tenant_id})
-    LM_ADMIN_DELETE_PASSWORD: str = ""
 
     CORS_ORIGINS: list[str] = ["*"]
 
@@ -68,6 +62,15 @@ class Settings(BaseSettings):
     LM_CP_AUTH_FAILURE_WINDOW_SECONDS: int = Field(default=600, ge=1)
     LM_CP_AUTH_LOCKOUT_SECONDS: int = Field(default=900, ge=1)
 
+    # Admin login failures (and wrong re-entered passwords on tenant deletion):
+    # counted per typed e-mail and, separately, per client IP.
+    LM_ADMIN_LOGIN_EMAIL_MAX_FAILURES: int = Field(default=5, ge=1)
+    LM_ADMIN_LOGIN_EMAIL_WINDOW_SECONDS: int = Field(default=900, ge=1)
+    LM_ADMIN_LOGIN_EMAIL_LOCKOUT_SECONDS: int = Field(default=900, ge=1)
+    LM_ADMIN_LOGIN_IP_MAX_FAILURES: int = Field(default=10, ge=1)
+    LM_ADMIN_LOGIN_IP_WINDOW_SECONDS: int = Field(default=900, ge=1)
+    LM_ADMIN_LOGIN_IP_LOCKOUT_SECONDS: int = Field(default=900, ge=1)
+
     @model_validator(mode="after")
     def _signing_key_required_outside_dev(self) -> "Settings":
         if self.LM_ED25519_PRIVATE_KEY_B64.strip():
@@ -78,10 +81,6 @@ class Settings(BaseSettings):
                 "(see scripts/gen_ed25519_keypair.py)"
             )
         return self
-
-    @property
-    def admin_emails(self) -> set[str]:
-        return {e.strip().lower() for e in self.LM_ADMIN_EMAILS.split(",") if e.strip()}
 
     @property
     def is_dev(self) -> bool:

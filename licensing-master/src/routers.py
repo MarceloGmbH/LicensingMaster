@@ -4,15 +4,22 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Header, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy.engine import Connection
 
-from src import ratelimit, service
-from src.auth import AdminIdentity, ServiceIdentity, admin_identity, service_identity
+from src import admin_auth, ratelimit, service
+from src.auth import AdminIdentity, ServiceIdentity, admin_identity, csrf_guard, service_identity
 from src.config import settings
 from src.db import UnitOfWork, get_read_connection, get_write_uow
-from src.envelope import Envelope, ok
-from src.errors import ActivationTokenInvalidError, ForbiddenError, TooManyAttemptsError
+from src.envelope import Envelope, fail, ok
+from src.errors import (
+    ActivationTokenInvalidError,
+    ForbiddenError,
+    TooManyAttemptsError,
+    UnauthorizedError,
+)
 
 router = APIRouter()
 
@@ -38,7 +45,7 @@ def activate(
     body: Annotated[dict, Body()],
 ) -> Envelope:
     """First-run terminal activation. Unauthenticated — batch-token-gated. MUST
-    be reachable without Cloudflare Access (ADR-0015). Failed token attempts
+    stay reachable without an admin session (ADR-0015). Failed token attempts
     are throttled per client IP (429 TOO_MANY_ATTEMPTS)."""
     try:
         return ok(service.public_activate(uow.connection, body))
@@ -47,14 +54,91 @@ def activate(
         raise
 
 
-# ---- admin (Cloudflare Access) -----------------------------------------
+# ---- admin (native login: password + TOTP, lm_session cookie) ------------
 
-admin = APIRouter(prefix="/admin", tags=["admin"])
+# Every state-changing /admin/* request (login included) must carry the portal's
+# X-Requested-With header, on top of the SameSite=Strict session cookie.
+admin = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(csrf_guard)])
+auth_router = APIRouter(prefix="/auth", tags=["admin-auth"])
 
 
-@admin.get("/me", response_model=Envelope)
-def whoami(ident: Annotated[AdminIdentity, Depends(admin_identity)]) -> Envelope:
-    return ok({"email": ident.email})
+class LoginBody(BaseModel):
+    email: str
+    password: str
+    totp_code: str
+
+
+def _login_gate(email: str, ip: str) -> None:
+    """429 (with Retry-After) while the e-mail or the client IP is locked out."""
+    wait = max(
+        ratelimit.login_email_limiter.retry_after(email),
+        ratelimit.login_ip_limiter.retry_after(ip),
+    )
+    if wait:
+        raise TooManyAttemptsError(headers={"Retry-After": str(wait)})
+
+
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _session_cookie_kwargs() -> dict:
+    return {"httponly": True, "secure": not settings.is_dev, "samesite": "strict", "path": "/"}
+
+
+@auth_router.post("/login", response_model=Envelope)
+def login(
+    request: Request,
+    uow: Annotated[UnitOfWork, Depends(get_write_uow)],
+    body: LoginBody,
+):
+    ip = ratelimit.client_ip(request)
+    email = admin_auth.normalize_email(body.email)[:180]
+    _login_gate(email, ip)
+    result = admin_auth.login(
+        uow.connection,
+        email,
+        body.password,
+        body.totp_code,
+        ip=ip,
+        user_agent=request.headers.get("user-agent"),
+    )
+    if result is None:
+        ratelimit.login_email_limiter.record_failure(email)
+        ratelimit.login_ip_limiter.record_failure(ip)
+        # Returned (not raised) so the admin.login_failed audit row is committed.
+        err = UnauthorizedError(message="Invalid credentials")
+        return _no_store(JSONResponse(status_code=401, content=fail(err.to_error_detail()).model_dump(mode="json")))
+    raw, email = result
+    ratelimit.login_email_limiter.clear(email)
+    resp = _no_store(JSONResponse(content=ok({"email": email}).model_dump(mode="json")))
+    resp.set_cookie(
+        admin_auth.SESSION_COOKIE,
+        raw,
+        max_age=settings.LM_ADMIN_SESSION_ABSOLUTE_SECONDS,
+        **_session_cookie_kwargs(),
+    )
+    return resp
+
+
+@auth_router.post("/logout", response_model=Envelope)
+def logout(request: Request, uow: Annotated[UnitOfWork, Depends(get_write_uow)]):
+    raw = request.cookies.get(admin_auth.SESSION_COOKIE)
+    email = admin_auth.revoke_session(uow.connection, raw) if raw else None
+    if email:
+        service._audit(uow.connection, email, "admin.logout", "admin_user", email)
+    resp = _no_store(JSONResponse(content=ok({"logged_out": True}).model_dump(mode="json")))
+    resp.delete_cookie(admin_auth.SESSION_COOKIE, **_session_cookie_kwargs())
+    return resp
+
+
+@auth_router.get("/me", response_model=Envelope)
+def whoami(ident: Annotated[AdminIdentity, Depends(admin_identity)]):
+    return _no_store(JSONResponse(content=ok({"email": ident.email}).model_dump(mode="json")))
+
+
+admin.include_router(auth_router)
 
 
 @admin.get("/products", response_model=Envelope)
@@ -102,17 +186,23 @@ def patch_tenant(
 @admin.delete("/tenants/{tenant_id}", response_model=Envelope)
 def delete_tenant(
     tenant_id: int,
+    request: Request,
     uow: Annotated[UnitOfWork, Depends(get_write_uow)],
     ident: Annotated[AdminIdentity, Depends(admin_identity)],
-    x_admin_delete_password: Annotated[str | None, Header(alias="X-Admin-Delete-Password")] = None,
-    body: Annotated[dict, Body()] = None,
+    body: Annotated[dict | None, Body()] = None,
 ) -> Envelope:
-    """Hard delete a tenant (cascades via FK ondelete=CASCADE).
-    Requires X-Admin-Delete-Password header or admin_password body field.
-    """
-    provided = x_admin_delete_password or (body or {}).get("admin_password")
-    if provided != settings.LM_ADMIN_DELETE_PASSWORD:
-        raise ForbiddenError(message="Invalid admin password")
+    """Hard delete a tenant (cascades via FK ondelete=CASCADE). Requires the
+    logged-in admin's OWN password in the body (`admin_password`); wrong guesses
+    count towards the login lockout of that admin and of the client IP."""
+    ip = ratelimit.client_ip(request)
+    _login_gate(ident.email, ip)
+    provided = (body or {}).get("admin_password")
+    if not isinstance(provided, str) or not admin_auth.verify_admin_password(
+        uow.connection, ident.email, provided
+    ):
+        ratelimit.login_email_limiter.record_failure(ident.email)
+        ratelimit.login_ip_limiter.record_failure(ip)
+        raise ForbiddenError(message="Invalid password")
     return ok(service.admin_delete_tenant(uow.connection, ident.email, tenant_id))
 
 

@@ -17,28 +17,18 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("LM_DATABASE_URL"), reason="LM_DATABASE_URL not set"
 )
 
-H = {"X-Dev-Admin-Email": "tester@alanadev.com"}
-
-
-@pytest.fixture()
-def client() -> TestClient:
-    from src.main import app
-
-    return TestClient(app)
-
 
 def _tenant(client: TestClient, *, seat_limit: int = 5, quota: int = 10) -> dict:
     slug = f"t{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/admin/tenants",
-        headers=H,
         json={"product_code": "farmacia", "slug": slug, "name": "Hardening Co",
               "seat_limit": seat_limit, "base_url": "hardening.example.com"},
     )
     assert r.status_code == 201, r.text
     tid = r.json()["data"]["tenant"]["tenant_id"]
-    tok = client.post(f"/admin/tenants/{tid}/batch-tokens", headers=H, json={"quota": quota}).json()["data"]
-    svc = client.post(f"/admin/tenants/{tid}/service-tokens", headers=H, json={"name": "h"}).json()["data"]["token"]
+    tok = client.post(f"/admin/tenants/{tid}/batch-tokens", json={"quota": quota}).json()["data"]
+    svc = client.post(f"/admin/tenants/{tid}/service-tokens", json={"name": "h"}).json()["data"]["token"]
     return {"tid": tid, "token": tok["token"], "batch_token_id": tok["batch_token_id"],
             "S": {"Authorization": f"Bearer {svc}"}}
 
@@ -52,12 +42,12 @@ def _activate(client: TestClient, token: str, hw: str):
 
 
 def _seats(client: TestClient, t: dict) -> int:
-    toks = client.get(f"/admin/tenants/{t['tid']}", headers=H).json()["data"]["batch_tokens"]
+    toks = client.get(f"/admin/tenants/{t['tid']}").json()["data"]["batch_tokens"]
     return next(x["seats_consumed"] for x in toks if x["batch_token_id"] == t["batch_token_id"])
 
 
 def _audit_actions(client: TestClient, hw: str) -> list[str]:
-    items = client.get("/admin/audit", headers=H, params={"limit": 500}).json()["data"]["items"]
+    items = client.get("/admin/audit", params={"limit": 500}).json()["data"]["items"]
     return [a["action"] for a in items if str(a["target_id"]) == hw]
 
 
@@ -74,7 +64,7 @@ def test_batch_token_keeps_prefix_and_has_at_least_128_bits(client: TestClient) 
 
 def test_batch_tokens_are_unique(client: TestClient) -> None:
     t = _tenant(client)
-    other = client.post(f"/admin/tenants/{t['tid']}/batch-tokens", headers=H, json={"quota": 1}).json()["data"]["token"]
+    other = client.post(f"/admin/tenants/{t['tid']}/batch-tokens", json={"quota": 1}).json()["data"]["token"]
     assert other != t["token"]
 
 
@@ -127,7 +117,7 @@ def test_same_tenant_reactivation_rotates_key_without_consuming_seat(client: Tes
     assert new_key in data["device_config"] and old_key not in data["device_config"]
     assert _seats(client, t) == 1
     assert "device.license_rotate" in _audit_actions(client, hw)
-    assert old_key not in str(client.get("/admin/audit", headers=H, params={"limit": 500}).json())
+    assert old_key not in str(client.get("/admin/audit", params={"limit": 500}).json())
 
 
 def test_rotated_old_key_stops_verifying_and_heartbeating(client: TestClient) -> None:

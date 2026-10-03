@@ -2,30 +2,127 @@ import React, { useCallback, useEffect, useState } from "react";
 import {
   api,
   fmtDate,
+  setUnauthorizedHandler,
   stateBadge,
   type Product,
   type TenantDetail,
   type TenantRow,
 } from "./api";
 
+/** Auth gate: asks the backend who we are; shows the login form or the app. */
 export const App: React.FC = () => {
+  // undefined = still checking, null = logged out, string = operator e-mail
+  const [me, setMe] = useState<string | null | undefined>(undefined);
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setMe(null));
+    api.me().then((m) => setMe(m.email)).catch(() => setMe(null));
+  }, []);
+
+  if (me === undefined) return <div className="wrap"><div className="panel">Cargando…</div></div>;
+  if (me === null) return <Login onLoggedIn={setMe} />;
+  return <Dashboard me={me} onLoggedOut={() => setMe(null)} />;
+};
+
+const Login: React.FC<{ onLoggedIn: (email: string) => void }> = ({ onLoggedIn }) => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await api.login(email.trim(), password, code.trim());
+      setPassword("");
+      setCode("");
+      onLoggedIn(r.email);
+    } catch (e) {
+      setCode("");
+      const m = String((e as Error).message);
+      setErr(
+        m.startsWith("TOO_MANY_ATTEMPTS")
+          ? "Demasiados intentos fallidos. Espere unos minutos e intente de nuevo."
+          : m.startsWith("UNAUTHORIZED")
+            ? "Credenciales inválidas."
+            : m,
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="wrap">
+      <form className="panel login" onSubmit={submit}>
+        <h2>Gestor de Licencias</h2>
+        <label className="f">
+          Correo
+          <input
+            type="email"
+            autoComplete="username"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoFocus
+            required
+          />
+        </label>
+        <label className="f">
+          Contraseña
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </label>
+        <label className="f">
+          Código de 6 dígitos
+          <input
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+            required
+          />
+        </label>
+        {err && <div className="err">{err}</div>}
+        <button className="primary" type="submit" disabled={busy || !email || !password || code.length !== 6}>
+          {busy ? "Ingresando…" : "Ingresar"}
+        </button>
+      </form>
+    </div>
+  );
+};
+
+const Dashboard: React.FC<{ me: string; onLoggedOut: () => void }> = ({ me, onLoggedOut }) => {
   const [products, setProducts] = useState<Product[]>([]);
   const [active, setActive] = useState<string>("");
   const [tenants, setTenants] = useState<TenantRow[]>([]);
   const [openId, setOpenId] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [me, setMe] = useState<string>("");
 
   useEffect(() => {
     api.products().then((p) => {
       setProducts(p);
       setActive(p[0]?.code ?? "");
     }).catch((e) => setErr(String(e.message)));
-    fetch("/admin/me", { credentials: "include" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((b) => b?.data?.email && setMe(b.data.email))
-      .catch(() => {});
   }, []);
+
+  const logout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      /* the session is dropped either way */
+    }
+    onLoggedOut();
+  };
 
   const loadTenants = useCallback(() => {
     if (!active) return;
@@ -41,7 +138,8 @@ export const App: React.FC = () => {
       <header className="top">
         <h1>Gestor de Licencias</h1>
         <span className="muted">licensing.alanadev.com</span>
-        <span className="who">{me || "operador"}</span>
+        <span className="who">{me}</span>
+        <button onClick={logout}>Cerrar sesión</button>
       </header>
 
       {err && <div className="err">{err} <button onClick={() => setErr(null)}>✕</button></div>}
@@ -249,14 +347,14 @@ const TenantView: React.FC<{
   };
 
   const handleDelete = async () => {
-    if (!deletePassword.trim()) {
-      setDeleteError("La contraseña de administrador es requerida");
+    if (!deletePassword) {
+      setDeleteError("Ingrese su contraseña");
       return;
     }
     setDeleteBusy(true);
     setDeleteError(null);
     try {
-      await api.deleteTenant(tenantId, deletePassword.trim());
+      await api.deleteTenant(tenantId, deletePassword);
       onBack();
     } catch (e) {
       setDeleteError(String((e as Error).message));
@@ -516,12 +614,13 @@ const TenantView: React.FC<{
               ({d.tenant.slug}) y todos sus datos asociados.
             </p>
             <label className="f" style={{ marginTop: 16, display: "block" }}>
-              Contraseña de administrador
+              Su contraseña
               <input
                 type="password"
+                autoComplete="current-password"
                 value={deletePassword}
                 onChange={(e) => setDeletePassword(e.target.value)}
-                placeholder="Ingrese la contraseña de admin"
+                placeholder="Confirme con su propia contraseña"
                 autoFocus
               />
             </label>

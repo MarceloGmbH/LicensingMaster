@@ -411,11 +411,13 @@ Guard against clock tampering: if `now()` jumps backwards vs the last
 
 - **`https://licensing-cp.alanadev.com`** must be reachable from: every product
   backend server, and from first-run clients (for `/activate`). Public DNS,
-  TLS terminated at the shared Traefik. No Cloudflare Access on this hostname.
+  TLS terminated at the shared Traefik. No login wall on this hostname.
 - **Never** put an Access application (or any login wall) in front of
   `licensing-cp` — `/cp/*` callers are machines and will choke on an HTML page.
-- **`https://licensing.alanadev.com`** (portal + `/admin/*`) is operator-only and
-  **must** stay behind Cloudflare Access. Do not integrate against `/admin/*`.
+- **`https://licensing.alanadev.com`** (portal + `/admin/*`) is operator-only:
+  **must** be restricted to LAN/VPN at Traefik (ipAllowList) and is protected by
+  the native login (password + TOTP, `lm_session` cookie). Do not integrate
+  against `/admin/*`.
 - The `licensing-db` Postgres is never published — internal Docker network only.
 - Service tokens and batch tokens are bearer secrets: TLS only, out of URLs and
   logs, rotate on suspicion of leak.

@@ -1,13 +1,14 @@
 # Central licensing control plane (ADR-0013): its own Postgres, the
 # licensing-master API (with the portal bundled and served at "/"), and a
-# Cloudflare Tunnel connector. No published ports — the only way in is the
-# tunnel, so the box needs no public IP.
+# dormant Cloudflare Tunnel connector (profile `tunnel`). The portal/admin host
+# MUST be restricted to LAN/VPN at the reverse proxy (Traefik ipAllowList); the
+# native login (password + TOTP) is the second barrier. See deploy.md.
 #
 #   cp .env.licensing.example .env.licensing     # fill in real secrets
 #   docker compose --env-file .env.licensing -f docker-compose.yml up -d --build
 #
 # Migrations run automatically on container start (entrypoint.sh -> alembic
-# upgrade head). Cloudflare dashboard steps: deploy.md
+# upgrade head). First admin + network setup: deploy.md
 
 name: licensing
 
@@ -38,9 +39,8 @@ services:
     mem_limit: 512m
     cpus: 0.75
     environment:
-      # `production` enforces Cloudflare Access on /admin/* and /. Set
-      # LM_APP_ENV=development for a pre-tunnel smoke where the X-Dev-Admin-Email
-      # header fallback is accepted instead.
+      # `production` makes the session cookie Secure (HTTPS only) and requires the
+      # signing key. Use development only for a local, non-HTTPS smoke.
       APP_ENV: ${LM_APP_ENV:-production}
       APP_DEBUG: "false"
       LM_DATABASE_URL: postgresql+psycopg://${LM_POSTGRES_USER:-postgres}:${LM_POSTGRES_PASSWORD}@licensing-db:5432/${LM_POSTGRES_DB:-sistema_farmacia_licensing}
@@ -55,15 +55,18 @@ services:
       LM_CP_AUTH_FAILURE_WINDOW_SECONDS: ${LM_CP_AUTH_FAILURE_WINDOW_SECONDS:-600}
       LM_CP_AUTH_LOCKOUT_SECONDS: ${LM_CP_AUTH_LOCKOUT_SECONDS:-900}
       LM_FORWARDED_ALLOW_IPS: ${LM_FORWARDED_ALLOW_IPS:-*}
-      # Cloudflare Access — verifies the JWT the tunnel injects on /admin/* and /.
-      # Required in production; may be empty for an LM_APP_ENV=development smoke.
-      LM_ACCESS_TEAM_DOMAIN: ${LM_ACCESS_TEAM_DOMAIN:-}
-      LM_ACCESS_AUD: ${LM_ACCESS_AUD:-}
-      LM_ADMIN_EMAILS: ${LM_ADMIN_EMAILS:?set LM_ADMIN_EMAILS}
+      # Native admin login: session lifetimes and brute-force throttling.
+      LM_ADMIN_SESSION_IDLE_SECONDS: ${LM_ADMIN_SESSION_IDLE_SECONDS:-1800}
+      LM_ADMIN_SESSION_ABSOLUTE_SECONDS: ${LM_ADMIN_SESSION_ABSOLUTE_SECONDS:-28800}
+      LM_ADMIN_LOGIN_EMAIL_MAX_FAILURES: ${LM_ADMIN_LOGIN_EMAIL_MAX_FAILURES:-5}
+      LM_ADMIN_LOGIN_EMAIL_WINDOW_SECONDS: ${LM_ADMIN_LOGIN_EMAIL_WINDOW_SECONDS:-900}
+      LM_ADMIN_LOGIN_EMAIL_LOCKOUT_SECONDS: ${LM_ADMIN_LOGIN_EMAIL_LOCKOUT_SECONDS:-900}
+      LM_ADMIN_LOGIN_IP_MAX_FAILURES: ${LM_ADMIN_LOGIN_IP_MAX_FAILURES:-10}
+      LM_ADMIN_LOGIN_IP_WINDOW_SECONDS: ${LM_ADMIN_LOGIN_IP_WINDOW_SECONDS:-900}
+      LM_ADMIN_LOGIN_IP_LOCKOUT_SECONDS: ${LM_ADMIN_LOGIN_IP_LOCKOUT_SECONDS:-900}
       LM_DEFAULT_WINDOW_DAYS: ${LM_DEFAULT_WINDOW_DAYS:-30}
       LM_DEFAULT_GRACE_DAYS: ${LM_DEFAULT_GRACE_DAYS:-5}
       LM_DEFAULT_SEAT_LIMIT: ${LM_DEFAULT_SEAT_LIMIT:-5}
-      LM_ADMIN_DELETE_PASSWORD: ${LM_ADMIN_DELETE_PASSWORD:-}
       CORS_ORIGINS: ${LM_CORS_ORIGINS:-["*"]}
     # Published for curl verification and for an external reverse proxy (e.g. a
     # shared Traefik) when you route ingress that way instead of the bundled

@@ -64,6 +64,12 @@ class FailureLimiter:
             if len(hits) >= self.max_failures:
                 self._locked_until[key] = now + self.lockout_seconds
 
+    def clear(self, key: str) -> None:
+        """Forget ``key`` entirely (e.g. after a fully successful login)."""
+        with self._lock:
+            self._failures.pop(key, None)
+            self._locked_until.pop(key, None)
+
     def reset(self) -> None:
         with self._lock:
             self._failures.clear()
@@ -96,12 +102,28 @@ service_auth_limiter = FailureLimiter(
     settings.LM_CP_AUTH_FAILURE_WINDOW_SECONDS,
     settings.LM_CP_AUTH_LOCKOUT_SECONDS,
 )
+# Admin login: per typed e-mail (also for unknown e-mails, so lockout reveals
+# nothing) and per client IP. Also used for wrong re-entered passwords.
+login_email_limiter = FailureLimiter(
+    settings.LM_ADMIN_LOGIN_EMAIL_MAX_FAILURES,
+    settings.LM_ADMIN_LOGIN_EMAIL_WINDOW_SECONDS,
+    settings.LM_ADMIN_LOGIN_EMAIL_LOCKOUT_SECONDS,
+)
+login_ip_limiter = FailureLimiter(
+    settings.LM_ADMIN_LOGIN_IP_MAX_FAILURES,
+    settings.LM_ADMIN_LOGIN_IP_WINDOW_SECONDS,
+    settings.LM_ADMIN_LOGIN_IP_LOCKOUT_SECONDS,
+)
 
 
 def reset_all() -> None:
     """Test helper: also restores the configured thresholds."""
     activation_limiter.reset()
     service_auth_limiter.reset()
+    login_email_limiter.reset()
+    login_ip_limiter.reset()
+    login_email_limiter.max_failures = settings.LM_ADMIN_LOGIN_EMAIL_MAX_FAILURES
+    login_ip_limiter.max_failures = settings.LM_ADMIN_LOGIN_IP_MAX_FAILURES
     activation_limiter.max_failures = settings.LM_ACTIVATE_MAX_FAILURES
     service_auth_limiter.max_failures = settings.LM_CP_AUTH_MAX_FAILURES
 

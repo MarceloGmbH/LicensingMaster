@@ -1,13 +1,29 @@
-/** Thin fetch wrapper for the licensing-master /admin API (same origin). */
+/** Thin fetch wrapper for the licensing-master /admin API (same origin).
+ *
+ * Every call sends the session cookie (`same-origin`) and the CSRF header the
+ * backend requires on state-changing /admin/* requests. Any 401 other than a
+ * failed login means the session is gone: the registered handler returns the
+ * UI to the login screen. */
+
+let onUnauthorized: () => void = () => {};
+
+export function setUnauthorizedHandler(fn: () => void): void {
+  onUnauthorized = fn;
+}
 
 async function req<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const r = await fetch(path, {
     ...opts,
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Requested-With": "lm-portal",
+      ...(opts.headers || {}),
+    },
+    credentials: "same-origin",
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
+    if (r.status === 401 && path !== "/admin/auth/login") onUnauthorized();
     const e = body?.errors?.[0];
     throw new Error(e ? `${e.code}: ${e.message}` : `HTTP ${r.status}`);
   }
@@ -90,6 +106,13 @@ export interface TenantDetail {
 }
 
 export const api = {
+  me: () => req<{ email: string }>("/admin/auth/me"),
+  login: (email: string, password: string, totpCode: string) =>
+    req<{ email: string }>("/admin/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password, totp_code: totpCode }),
+    }),
+  logout: () => req<{ logged_out: boolean }>("/admin/auth/logout", { method: "POST" }),
   products: () => req<{ items: Product[] }>("/admin/products").then((d) => d.items),
   tenants: (product?: string) =>
     req<{ items: TenantRow[] }>(`/admin/tenants${product ? `?product=${product}` : ""}`).then(
@@ -130,7 +153,7 @@ export const api = {
   deleteTenant: (id: number, adminPassword: string) =>
     req<void>(`/admin/tenants/${id}`, {
       method: "DELETE",
-      headers: { "X-Admin-Delete-Password": adminPassword },
+      body: JSON.stringify({ admin_password: adminPassword }),
     }),
   patchTenant: (id: number, body: Record<string, unknown>) =>
     req<TenantDetail>(`/admin/tenants/${id}`, {

@@ -17,21 +17,11 @@ pytestmark = pytest.mark.skipif(
     not os.getenv("LM_DATABASE_URL"), reason="LM_DATABASE_URL not set"
 )
 
-H = {"X-Dev-Admin-Email": "tester@alanadev.com"}
-
-
-@pytest.fixture()
-def client() -> TestClient:
-    from src.main import app
-
-    return TestClient(app)
-
 
 def _tenant(client: TestClient, *, seat_limit: int = 2, quota: int = 5) -> dict:
     slug = f"t{uuid.uuid4().hex[:8]}"
     r = client.post(
         "/admin/tenants",
-        headers=H,
         json={
             "product_code": "farmacia",
             "slug": slug,
@@ -43,10 +33,10 @@ def _tenant(client: TestClient, *, seat_limit: int = 2, quota: int = 5) -> dict:
     assert r.status_code == 201, r.text
     tid = r.json()["data"]["tenant"]["tenant_id"]
     tok = client.post(
-        f"/admin/tenants/{tid}/batch-tokens", headers=H, json={"quota": quota}
+        f"/admin/tenants/{tid}/batch-tokens", json={"quota": quota}
     ).json()["data"]
     svc = client.post(
-        f"/admin/tenants/{tid}/service-tokens", headers=H, json={"name": "lc"}
+        f"/admin/tenants/{tid}/service-tokens", json={"name": "lc"}
     ).json()["data"]["token"]
     return {
         "tid": tid,
@@ -68,7 +58,7 @@ def _activate(client: TestClient, t: dict, hw: str, token: str | None = None):
 
 
 def _detail(client: TestClient, tid: int) -> dict:
-    return client.get(f"/admin/tenants/{tid}", headers=H).json()["data"]
+    return client.get(f"/admin/tenants/{tid}").json()["data"]
 
 
 def _seats_consumed(client: TestClient, t: dict) -> int:
@@ -81,7 +71,7 @@ def _devices(client: TestClient, tid: int, hw: str) -> list[dict]:
 
 
 def _audit_actions(client: TestClient, hw: str) -> list[str]:
-    items = client.get("/admin/audit", headers=H, params={"limit": 500}).json()["data"]["items"]
+    items = client.get("/admin/audit", params={"limit": 500}).json()["data"]["items"]
     return [a["action"] for a in items if str(a["target_id"]) == hw]
 
 
@@ -92,7 +82,7 @@ def test_revoked_device_can_be_reactivated_with_batch_token(client: TestClient) 
     assert first.status_code == 201, first.text
     old_key = first.json()["data"]["license_key"]
 
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
 
     again = _activate(client, t, hw)
     assert again.status_code == 201, again.text
@@ -113,7 +103,7 @@ def test_revoke_releases_batch_seat_exactly_once(client: TestClient) -> None:
     assert _activate(client, t, hw).status_code == 201
     assert _seats_consumed(client, t) == 1
 
-    r = client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    r = client.post(f"/admin/devices/{hw}/revoke")
     assert r.status_code == 200, r.text
     assert r.json()["data"]["is_revoked"] is True
     assert _seats_consumed(client, t) == 0
@@ -122,23 +112,23 @@ def test_revoke_releases_batch_seat_exactly_once(client: TestClient) -> None:
     other = _hw()
     assert _activate(client, t, other).status_code == 201
     assert _seats_consumed(client, t) == 1
-    assert client.post(f"/admin/devices/{hw}/revoke", headers=H).status_code == 200
+    assert client.post(f"/admin/devices/{hw}/revoke").status_code == 200
     assert _seats_consumed(client, t) == 1
     assert _audit_actions(client, hw).count("device.revoke") == 1
 
 
 def test_revoke_unknown_device_is_404(client: TestClient) -> None:
-    assert client.post(f"/admin/devices/{_hw()}/revoke", headers=H).status_code == 404
+    assert client.post(f"/admin/devices/{_hw()}/revoke").status_code == 404
 
 
 def test_reinstate_keeps_license_key_and_consumes_seat(client: TestClient) -> None:
     t = _tenant(client)
     hw = _hw()
     key = _activate(client, t, hw).json()["data"]["license_key"]
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
     assert _seats_consumed(client, t) == 0
 
-    r = client.post(f"/admin/devices/{hw}/reinstate", headers=H)
+    r = client.post(f"/admin/devices/{hw}/reinstate")
     assert r.status_code == 200, r.text
     dev = r.json()["data"]
     assert dev["is_revoked"] is False
@@ -156,24 +146,24 @@ def test_reinstate_not_revoked_is_noop(client: TestClient) -> None:
     t = _tenant(client)
     hw = _hw()
     _activate(client, t, hw)
-    r = client.post(f"/admin/devices/{hw}/reinstate", headers=H)
+    r = client.post(f"/admin/devices/{hw}/reinstate")
     assert r.status_code == 200, r.text
     assert _seats_consumed(client, t) == 1
     assert "device.reinstate" not in _audit_actions(client, hw)
 
 
 def test_reinstate_unknown_device_is_404(client: TestClient) -> None:
-    assert client.post(f"/admin/devices/{_hw()}/reinstate", headers=H).status_code == 404
+    assert client.post(f"/admin/devices/{_hw()}/reinstate").status_code == 404
 
 
 def test_reinstate_and_reactivate_respect_seat_limit(client: TestClient) -> None:
     t = _tenant(client, seat_limit=1)
     hw = _hw()
     _activate(client, t, hw)
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
     assert _activate(client, t, _hw()).status_code == 201  # takes the only seat
 
-    r = client.post(f"/admin/devices/{hw}/reinstate", headers=H)
+    r = client.post(f"/admin/devices/{hw}/reinstate")
     assert r.status_code == 409 and r.json()["errors"][0]["code"] == "SEAT_LIMIT_REACHED"
     assert _devices(client, t["tid"], hw)[0]["is_revoked"] is True
 
@@ -185,13 +175,13 @@ def test_reinstate_and_reactivate_respect_batch_quota(client: TestClient) -> Non
     t = _tenant(client, seat_limit=5, quota=1)
     hw = _hw()
     _activate(client, t, hw)
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
     # use the freed seat on a different machine via /cp/seats/consume
     assert client.post(
         "/cp/seats/consume", headers=t["S"], json={"token": t["token"], "hardware_uuid": _hw()}
     ).status_code == 201
 
-    r = client.post(f"/admin/devices/{hw}/reinstate", headers=H)
+    r = client.post(f"/admin/devices/{hw}/reinstate")
     assert r.status_code == 409 and r.json()["errors"][0]["code"] == "SEAT_LIMIT_REACHED"
     assert _seats_consumed(client, t) == 1
 
@@ -202,7 +192,7 @@ def test_cp_consume_seat_rebooks_revoked_row(client: TestClient) -> None:
     hw = _hw()
     body = {"token": t["token"], "hardware_uuid": hw, "device_name": "Caja Y"}
     assert client.post("/cp/seats/consume", headers=t["S"], json=body).json()["data"]["consumed"] is True
-    client.post(f"/admin/devices/{hw}/revoke", headers=H)
+    client.post(f"/admin/devices/{hw}/revoke")
     assert _seats_consumed(client, t) == 0
 
     r = client.post("/cp/seats/consume", headers=t["S"], json=body)

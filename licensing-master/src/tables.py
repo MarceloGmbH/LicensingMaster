@@ -152,3 +152,39 @@ audit_log = Table(
     Column("payload", JSONB),
     Column("at", _TS, nullable=False, server_default=func.now()),
 )
+
+# --- native admin authentication (password + TOTP, server-side sessions) ---
+
+admin_users = Table(
+    "admin_users",
+    metadata,
+    Column("admin_user_id", BigInteger, primary_key=True),
+    Column("email", String(180), nullable=False, unique=True),
+    Column("password_hash", Text, nullable=False),
+    Column("totp_secret", String(64), nullable=False),
+    # Last accepted TOTP time step: a code can be used at most once.
+    Column("totp_last_step", BigInteger),
+    Column("is_active", Boolean, nullable=False, server_default="true"),
+    Column("created_at", _TS, nullable=False, server_default=func.now()),
+    Column("last_login_at", _TS),
+)
+
+admin_sessions = Table(
+    "admin_sessions",
+    metadata,
+    Column("admin_session_id", BigInteger, primary_key=True),
+    Column(
+        "admin_user_id",
+        BigInteger,
+        ForeignKey("licensing.admin_users.admin_user_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    # sha256 hex of the 256-bit random cookie value; the raw token is never stored.
+    Column("token_hash", String(64), nullable=False, unique=True),
+    Column("created_at", _TS, nullable=False),
+    Column("last_seen_at", _TS, nullable=False),
+    Column("expires_at", _TS, nullable=False),  # absolute lifetime
+    Column("revoked_at", _TS),
+    Column("ip", String(64)),
+    Column("user_agent", String(300)),
+)
